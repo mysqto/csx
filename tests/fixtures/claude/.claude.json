@@ -1,0 +1,17 @@
+{
+  "numStartups": 12,
+  "installMethod": "brew",
+  "oauthAccount": {
+    "accountUuid": "11111111-2222-3333-4444-555555555555",
+    "emailAddress": "dev@example.com",
+    "organizationUuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "organizationName": "Acme Inc",
+    "organizationRole": "admin",
+    "displayName": "Dev Example"
+  },
+  "projects": {
+    "/work/acme/api": {
+      "lastSessionId": "sess-claude-1"
+    }
+  }
+}
