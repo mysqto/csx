@@ -153,31 +153,32 @@ fn index_file(
     }
 
     let session_id = meta.session_id.clone();
+    let added = delta.messages.len();
 
-    // Insert the delta's messages.
-    for m in &delta.messages {
-        db.insert_message(source_id, m)?;
-    }
-
-    // Grow the cumulative session message count by the delta size.
-    let prior = db.session_msg_count(&session_id)?.unwrap_or(0);
-    let total = prior + delta.messages.len() as i64;
-    let summary = session_summary(&meta);
-    db.upsert_session(source_id, &meta, total, summary.as_deref())?;
-
-    // Track the file identity and advance its watermark.
-    db.upsert_file(
-        source_id,
-        file.path.to_str(),
-        &file.file_key,
-        file.size as i64,
-        file.mtime,
-        Some(&session_id),
-    )?;
-    db.set_watermark(&file.file_key, delta.new_watermark as i64)?;
+    // Fold the whole file into the DB atomically. One transaction collapses
+    // this file's hundreds of inserts (messages + both FTS indexes) into a
+    // single commit — the dominant cost of a cold index — and keeps each
+    // file's messages, session rollup, and advanced watermark consistent.
+    db.transaction(|| {
+        for m in &delta.messages {
+            db.insert_message(source_id, m)?;
+        }
+        let prior = db.session_msg_count(&session_id)?.unwrap_or(0);
+        let summary = session_summary(&meta);
+        db.upsert_session(source_id, &meta, prior + added as i64, summary.as_deref())?;
+        db.upsert_file(
+            source_id,
+            file.path.to_str(),
+            &file.file_key,
+            file.size as i64,
+            file.mtime,
+            Some(&session_id),
+        )?;
+        db.set_watermark(&file.file_key, delta.new_watermark as i64)
+    })?;
 
     stats.files_indexed += 1;
-    stats.messages_added += delta.messages.len();
+    stats.messages_added += added;
     touched_sessions.insert(session_id);
     Ok(())
 }

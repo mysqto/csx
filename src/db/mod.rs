@@ -287,14 +287,44 @@ impl Db {
             Connection::open(path)?
         };
         let db = Db { conn };
+        db.configure()?;
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Connection PRAGMAs tuned for the insert-heavy indexer: WAL journaling
+    /// with `synchronous = NORMAL` collapses the per-transaction fsync that
+    /// dominates a cold index, plus an in-memory temp store, a larger page
+    /// cache, memory-mapped reads, and a busy timeout. Safe on `:memory:`
+    /// (journalling stays `memory`; the rest are harmless).
+    fn configure(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -65536;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(())
     }
 
     /// Borrow the underlying connection (read-only helper for advanced callers
     /// and tests).
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Run `f` inside one SQLite transaction on this connection: commit on
+    /// `Ok`, roll back on `Err`. Uses a shared-borrow transaction so the
+    /// ordinary `&self` write methods compose inside `f`.
+    pub fn transaction<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        let tx = self.conn.unchecked_transaction()?;
+        let out = f();
+        if out.is_ok() {
+            tx.commit()?;
+        }
+        out
     }
 
     /// Create every table and index if absent. Idempotent.
@@ -1010,6 +1040,34 @@ mod tests {
 
     fn ids(hits: &[Hit]) -> Vec<String> {
         hits.iter().map(|h| h.session_id.clone()).collect()
+    }
+
+    #[test]
+    fn transaction_commits_on_ok_and_rolls_back_on_err() {
+        let db = Db::open(":memory:").unwrap();
+        let count = |db: &Db| -> i64 {
+            db.conn()
+                .query_row("SELECT count(*) FROM messages_text", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        // Ok → committed.
+        db.transaction(|| {
+            db.conn()
+                .execute("INSERT INTO messages_text (id, body) VALUES (1, 'a')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count(&db), 1);
+
+        // Err → rolled back, the insert inside the closure is discarded.
+        let r = db.transaction(|| -> Result<()> {
+            db.conn()
+                .execute("INSERT INTO messages_text (id, body) VALUES (2, 'b')", [])?;
+            Err(crate::error::Error::other("boom"))
+        });
+        assert!(r.is_err());
+        assert_eq!(count(&db), 1);
     }
 
     #[test]
