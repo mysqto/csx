@@ -43,15 +43,17 @@ Run coverage with Homebrew LLVM so `llvm-cov`/`llvm-profdata` match the
 toolchain:
 
 ```sh
-LLVM_COV=/usr/local/opt/llvm/bin/llvm-cov \
-LLVM_PROFDATA=/usr/local/opt/llvm/bin/llvm-profdata \
+LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov" \
+LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata" \
 cargo llvm-cov \
   --all-features \
-  --ignore-filename-regex '_shim\.rs$' \
+  --ignore-filename-regex '(_shim\.rs$|/main\.rs$)' \
   --summary-only
 ```
 
-**Ignore regex:** `_shim\.rs$`. That is the coverage boundary.
+**Ignore regex:** `(_shim\.rs$|/main\.rs$)`. That is the coverage boundary — the
+`*_shim.rs` adapters plus the trivial `main.rs` entry point (which only
+delegates to `csx::run`). Everything else must be covered.
 
 Rules that keep coverage reachable:
 

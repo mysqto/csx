@@ -20,24 +20,52 @@ you explicitly turn on the retrieval-augmented `ask` command.
 
 ## Install
 
+### Homebrew (macOS & Linux)
+
 ```sh
-cargo install --path .
+brew tap mysqto/csx https://github.com/mysqto/csx
+brew install --cask csx
 ```
 
-This builds a single `csx` binary. SQLite (with the FTS5 and trigram
+The cask is regenerated with real checksums by each release
+(`.github/workflows/release.yml`), so it tracks the latest tag.
+
+### Prebuilt binary
+
+Download the tarball for your platform from the [latest release][releases],
+extract it, and put `csx` on your `PATH`. Assets are named
+`csx-<tag>-<target>.tar.gz`, each with a matching `.sha256`:
+
+| Platform | Target |
+| --- | --- |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` |
+
+### From source
+
+```sh
+cargo install --git https://github.com/mysqto/csx   # or, in a clone: cargo install --path .
+```
+
+Every method produces a single `csx` binary. SQLite (with the FTS5 and trigram
 extensions) is compiled in via `rusqlite`'s `bundled` feature, so there is no
 system SQLite dependency.
 
+[releases]: https://github.com/mysqto/csx/releases/latest
+
 ### Configuration via environment
 
-| Variable             | Purpose                                                        | Default              |
-| -------------------- | -------------------------------------------------------------- | -------------------- |
-| `CSX_DB`             | Path to the index database.                                    | `~/.csx/index.sqlite`|
-| `CLAUDE_CONFIG_DIR`  | Claude Code config root to index.                              | `~/.claude`          |
-| `CODEX_HOME`         | Codex CLI config root to index.                                | `~/.codex`           |
-| `ANTHROPIC_API_KEY`  | Enables the `ask` command (RAG answers).                       | unset (ask disabled) |
-| `VOYAGE_API_KEY`     | Adds dense embeddings to `ask` for hybrid retrieval.           | unset (BM25 only)    |
-| `CSX_EMBED_MODEL`    | Embedding model id used when `VOYAGE_API_KEY` is set.          | `voyage-3`           |
+| Variable             | Purpose                                                        | Default               |
+| -------------------- | -------------------------------------------------------------- | --------------------- |
+| `CSX_DB`             | Path to the index database.                                    | `~/.csx/index.sqlite` |
+| `CLAUDE_CONFIG_DIR`  | Claude Code config root to index.                              | `~/.claude`           |
+| `CODEX_HOME`         | Codex CLI config root to index.                                | `~/.codex`            |
+| `ANTHROPIC_API_KEY`  | Enables the `ask` command (RAG answers).                       | unset (ask disabled)  |
+| `CSX_CHAT_MODEL`     | Chat model `ask` uses when `ANTHROPIC_API_KEY` is set.         | `claude-opus-4-8`     |
+| `VOYAGE_API_KEY`     | Adds dense embeddings to `ask` for hybrid retrieval.           | unset (BM25 only)     |
+| `CSX_EMBED_MODEL`    | Embedding model id used when `VOYAGE_API_KEY` is set.          | `voyage-3`            |
 
 When `ANTHROPIC_API_KEY` is unset, `ask` reports that it is not configured
 rather than fabricating an answer; every other command works fully offline.
@@ -214,18 +242,21 @@ the Rust toolchain's LLVM. On macOS the simplest match is Homebrew LLVM:
 ```sh
 brew install llvm
 
-LLVM_COV=/usr/local/opt/llvm/bin/llvm-cov \
-LLVM_PROFDATA=/usr/local/opt/llvm/bin/llvm-profdata \
+LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov" \
+LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata" \
 cargo llvm-cov \
   --all-features \
-  --ignore-filename-regex '_shim\.rs$' \
+  --ignore-filename-regex '(_shim\.rs$|/main\.rs$)' \
   --summary-only
 ```
 
+(`$(brew --prefix llvm)` resolves to `/usr/local/opt/llvm` on Intel and
+`/opt/homebrew/opt/llvm` on Apple Silicon.)
+
 The `_shim.rs` files are the ports-and-adapters boundary — the only code that
 touches the live filesystem watcher, sockets, HTTP, the MCP stdio transport, or
-the `git` binary. They contain no branching logic and are excluded from
-coverage via the ignore regex above. Everything else is decision logic and is
+the `git` binary. Together with the trivial `main.rs` entry point they contain
+no branching logic and are excluded from coverage via the ignore regex above. Everything else is decision logic and is
 unit-tested with fakes, temp directories, and in-memory SQLite. See `AGENTS.md`
 for the full discipline.
 
