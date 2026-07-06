@@ -170,8 +170,10 @@ Test fixtures live under `tests/fixtures/`, mirroring each tool's real on-disk
 layout:
 
 - `tests/fixtures/claude/.claude.json` — account attribution source.
-- `tests/fixtures/claude/projects/<project>/sessions/*.jsonl` — Claude
-  transcripts.
+- `tests/fixtures/claude/projects/<project>/…/*.jsonl` — Claude transcripts.
+  Real Claude Code writes them as `projects/<encoded-cwd>/<uuid>.jsonl` (directly
+  in the project dir); discovery accepts any `*.jsonl` under `projects/`, so a
+  `sessions/` subdir works too.
 - `tests/fixtures/codex/sessions/YYYY/MM/DD/*.jsonl` — Codex rollouts.
 
 Add fixtures for a new adapter under `tests/fixtures/<tool>/…` matching its real

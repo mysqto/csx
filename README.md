@@ -202,9 +202,11 @@ knows how to (a) discover that tool's transcript files under a config root and
 (b) incrementally parse them into the canonical `MessageRecord` /
 `SessionMeta` types. Two adapters ship today:
 
-- **`ClaudeSource`** — reads `<root>/projects/**/sessions/*.jsonl` under
-  `~/.claude` (or `CLAUDE_CONFIG_DIR`), with account attribution from
-  `.claude.json`'s `oauthAccount`.
+- **`ClaudeSource`** — reads `<root>/projects/<encoded-cwd>/*.jsonl` under
+  `~/.claude` (or `CLAUDE_CONFIG_DIR`) — Claude Code writes one
+  `<session-uuid>.jsonl` per session directly in the project dir (a `sessions/`
+  subdir is also accepted) — with account attribution from `.claude.json`'s
+  `oauthAccount`.
 - **`CodexSource`** — reads `<root>/sessions/**/*.jsonl` under `~/.codex` (or
   `CODEX_HOME`); Codex rollout lines map `session_meta`, `message`,
   `reasoning`, `function_call`, and `function_call_output` payloads onto the

@@ -99,7 +99,10 @@ fn account_from_config(value: &Value) -> Option<Account> {
     })
 }
 
-/// Discover transcript files under `<root>/projects/**/sessions/*.jsonl`.
+/// Discover transcript files under `<root>/projects/`. Claude Code writes one
+/// `<session-uuid>.jsonl` per session directly inside each url-encoded project
+/// directory (`projects/<encoded-cwd>/<uuid>.jsonl`); older/other layouts may
+/// nest them under a `sessions/` subdir. Both are picked up.
 fn discover_files(root: &Path) -> Result<Vec<SessionFile>> {
     let projects = root.join("projects");
     let mut out = Vec::new();
@@ -124,19 +127,13 @@ fn discover_files(root: &Path) -> Result<Vec<SessionFile>> {
     Ok(out)
 }
 
-/// True when `path` is a `*.jsonl` file whose immediate parent directory is
-/// named `sessions` (i.e. `.../sessions/<file>.jsonl`).
+/// True when `path` is a `*.jsonl` file anywhere under `projects/` — Claude
+/// stores transcripts as `projects/<encoded-cwd>/<uuid>.jsonl` (session files
+/// live directly in the project dir, not a `sessions/` subdir). The caller only
+/// walks under `projects/`, and sibling data there is Markdown (`memory/`), so
+/// a `.jsonl` extension is a sufficient, layout-agnostic marker.
 fn is_session_transcript(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-        return false;
-    }
-    path.parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        == Some("sessions")
+    path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
 
 impl SessionSource for ClaudeSource {
@@ -465,24 +462,29 @@ mod tests {
     }
 
     #[test]
-    fn is_session_transcript_rejects_wrong_parent_and_ext() {
+    fn is_session_transcript_accepts_jsonl_by_layout() {
         let dir = std::env::temp_dir().join(format!("csx-claude-pred-{}", std::process::id()));
-        let sessions = dir.join("projects").join("proj").join("sessions");
+        let proj = dir.join("projects").join("proj");
+        let sessions = proj.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
-        let good = sessions.join("a.jsonl");
-        std::fs::File::create(&good)
+        // Real Claude layout: `<uuid>.jsonl` directly in the project dir.
+        let direct = proj.join("a.jsonl");
+        std::fs::File::create(&direct)
             .unwrap()
             .write_all(b"{}\n")
             .unwrap();
-        assert!(is_session_transcript(&good));
-        // Wrong extension.
-        let txt = sessions.join("b.txt");
+        assert!(is_session_transcript(&direct));
+        // Older/other layout: nested under a `sessions/` subdir — also accepted.
+        let nested = sessions.join("b.jsonl");
+        std::fs::File::create(&nested)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        assert!(is_session_transcript(&nested));
+        // Wrong extension is rejected.
+        let txt = proj.join("c.txt");
         std::fs::File::create(&txt).unwrap();
         assert!(!is_session_transcript(&txt));
-        // Right ext, wrong parent directory name.
-        let wrong = dir.join("projects").join("proj").join("other.jsonl");
-        std::fs::File::create(&wrong).unwrap();
-        assert!(!is_session_transcript(&wrong));
         // A directory is never a transcript.
         assert!(!is_session_transcript(&sessions));
         std::fs::remove_dir_all(&dir).ok();
