@@ -4,21 +4,21 @@ cask "csx" do
 
   on_macos do
     on_arm do
-      sha256 "46eca795b0a3df41a1fece2b01c3e871eddf3a51ec808bfef8b367efd42cce89"
+      sha256 "72ca25542f85cc0d6e5acccb6e9fe889b6d4099202dd5f78cfb5707990b2a5b3"
       url "https://github.com/mysqto/csx/releases/download/v#{version}/csx-v#{version}-aarch64-apple-darwin.tar.gz"
     end
     on_intel do
-      sha256 "16c2fd91385105d0dcad14d0dd10fc8031b058cfb2af428f6833c4aca1ef1533"
+      sha256 "71bf39d4068e23be8461a69b54f46e16ba27c1d2411e1009bf84fa921ba15e0f"
       url "https://github.com/mysqto/csx/releases/download/v#{version}/csx-v#{version}-x86_64-apple-darwin.tar.gz"
     end
   end
   on_linux do
     on_arm do
-      sha256 "fa17c2bd0c437d52b65bef297fa44578473676d84f222ab4dbe121ed9c9732d1"
+      sha256 "9429c08fa8e79c3cc2f82844b0c1ba0a408d18887272b125df19ce5c9f6c2290"
       url "https://github.com/mysqto/csx/releases/download/v#{version}/csx-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
     end
     on_intel do
-      sha256 "2217578674ae7d949081013c2c002677d8e721dd4168a7309f9e8c5e419d6392"
+      sha256 "ca95f0cd573f42d718663707cb8139a757d264c374d72babeacb01fd03984a3b"
       url "https://github.com/mysqto/csx/releases/download/v#{version}/csx-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
     end
   end
