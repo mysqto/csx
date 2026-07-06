@@ -24,6 +24,11 @@ cask "csx" do
     end
   end
 
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
   name "csx"
   desc "Local full-text + hybrid search across AI-coding sessions"
   homepage "https://github.com/mysqto/csx"
