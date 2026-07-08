@@ -8,6 +8,15 @@ All notable changes to csx are documented here. The format follows
 
 _Nothing yet._
 
+## [0.1.1] — 2026-07-06
+
+### Changed
+
+- **`serve` and `mcp` are now runnable.** The daemon (file-watching + socket
+  query server) and the MCP stdio server were present as tested logic in 0.1.0
+  but their CLI commands were placeholders; both are now wired end-to-end.
+  `csx serve` runs the daemon; `csx mcp` speaks MCP JSON-RPC over stdio.
+
 ## [0.1.0] — 2026-07-06
 
 First release.

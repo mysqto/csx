@@ -34,7 +34,9 @@ pub use analyze::{
     prompt_hash, run_analyzer, AnalysisStore, AnalyzeStats, Analyzer, Entity, SessionAnalysis,
 };
 pub use chat_shim::AnthropicChat;
-pub use cli::{AskEngine, Cli, Command, ScopeArgs};
+pub use cli::{
+    resolve_sock_path, watch_roots, AskEngine, Cli, Command, DaemonRunner, McpRunner, ScopeArgs,
+};
 pub use cli_shim::run;
 pub use clock_shim::SystemClock;
 pub use daemon::{

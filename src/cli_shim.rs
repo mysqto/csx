@@ -11,11 +11,68 @@
 
 use clap::Parser;
 
-use crate::cli::{dispatch, resolve_db_path, AskEngine, Cli, UnavailableAsk};
+use crate::cli::{
+    dispatch, resolve_db_path, resolve_sock_path, watch_roots, AskEngine, Cli, DaemonRunner,
+    McpRunner, UnavailableAsk,
+};
+use crate::daemon::{serve_loop, watch_loop, Debouncer};
 use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::git_shim::ProcessGit;
+use crate::git_shim::{GitRunner, ProcessGit};
 use crate::source::{ClaudeSource, CodexSource, SessionSource};
+use crate::transport_shim::UnixSocketListener;
+use crate::watch_shim::NotifyWatcher;
+use crate::SystemClock;
+
+/// Quiet-window, in milliseconds, the daemon waits after the last observed
+/// change before it re-indexes; long enough to coalesce an editor's write burst.
+const DEBOUNCE_MS: u64 = 500;
+
+/// Real [`DaemonRunner`]: watches the configured source roots with a
+/// [`NotifyWatcher`], answers scoped query requests on a [`UnixSocketListener`],
+/// and debounces re-indexing against the [`SystemClock`].
+struct RealDaemon;
+
+impl DaemonRunner for RealDaemon {
+    fn serve(
+        &self,
+        db: &Db,
+        sources: &[Box<dyn SessionSource>],
+        git: &dyn GitRunner,
+    ) -> Result<()> {
+        // Warm the index once so the socket serves current data immediately.
+        let _ = crate::index::sync(sources, db, git);
+
+        // The query-serving side owns its own connection to the same on-disk
+        // index (a rusqlite `Connection` is not `Sync`), so it can run on a
+        // background thread while the watch loop re-indexes on this thread.
+        let sock_path = resolve_sock_path();
+        let listener = UnixSocketListener::bind(&sock_path)?;
+        let serve_db =
+            Db::open(resolve_db_path().to_str().ok_or_else(|| {
+                Error::other("non-utf8 database path while starting the daemon")
+            })?)?;
+        std::thread::spawn(move || {
+            let _ = serve_loop(&listener, &serve_db);
+        });
+
+        // Watch the source roots and re-index on each settled burst until the
+        // watch backend disconnects.
+        let mut watcher = NotifyWatcher::new(&watch_roots(sources))?;
+        let mut debouncer = Debouncer::new(DEBOUNCE_MS);
+        let clock = SystemClock::default();
+        watch_loop(&mut watcher, &mut debouncer, &clock, sources, db, git)
+    }
+}
+
+/// Real [`McpRunner`]: pumps the MCP handler over the process's stdin/stdout.
+struct RealMcp;
+
+impl McpRunner for RealMcp {
+    fn serve(&self, db: &Db, engine: &dyn AskEngine) -> Result<()> {
+        crate::mcp_shim::serve_stdio(db, engine)
+    }
+}
 
 /// Build the default set of sources from the environment (Claude Code + Codex).
 fn default_sources() -> Vec<Box<dyn SessionSource>> {
@@ -62,5 +119,14 @@ pub fn run() -> Result<()> {
     let engine = default_ask_engine();
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    dispatch(cli, &db, &sources, &git, engine.as_ref(), &mut lock)
+    dispatch(
+        cli,
+        &db,
+        &sources,
+        &git,
+        engine.as_ref(),
+        &RealDaemon,
+        &RealMcp,
+        &mut lock,
+    )
 }

@@ -169,9 +169,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start the background indexing daemon (see the `serve` stage).
+    /// Start the background indexing daemon: watch the source roots, debounce
+    /// re-indexing, and answer scoped queries over a Unix socket.
     Serve,
-    /// Start the MCP server (see the `mcp` stage).
+    /// Start the MCP server: speak JSON-RPC over stdio so an agent can search,
+    /// fetch, and ask over the indexed sessions as tools.
     Mcp,
 }
 
@@ -203,6 +205,28 @@ impl AskEngine for UnavailableAsk {
             "ask is not available yet: the retrieval-augmented answer engine is not configured",
         ))
     }
+}
+
+/// Port that runs the background indexing/serving daemon.
+///
+/// Defined as a port so the `serve` dispatch arm is exercised by a fake in
+/// tests; the real adapter ([`crate::cli_shim`]) constructs the filesystem
+/// watcher, Unix-socket listener, and system clock and runs the daemon loops.
+pub trait DaemonRunner {
+    /// Run the daemon over `sources`/`db` until a watcher or listener error
+    /// stops it.
+    fn serve(&self, db: &Db, sources: &[Box<dyn SessionSource>], git: &dyn GitRunner)
+        -> Result<()>;
+}
+
+/// Port that runs the MCP stdio server.
+///
+/// Defined as a port so the `mcp` dispatch arm is exercised by a fake in tests;
+/// the real adapter ([`crate::cli_shim`]) pumps the [`crate::mcp`] handler over
+/// the process's stdin/stdout.
+pub trait McpRunner {
+    /// Serve MCP requests against `db` (and `engine`) until stdin reaches EOF.
+    fn serve(&self, db: &Db, engine: &dyn AskEngine) -> Result<()>;
 }
 
 /// Handle the `sync` command: run the indexer over `sources` and report stats.
@@ -314,12 +338,18 @@ pub fn handle_ask(
 /// Dispatch a parsed [`Cli`] against injected dependencies, writing all output
 /// to `out`. This is the testable core of the CLI; [`run`] supplies the real
 /// dependencies.
+// A wiring hub: it forwards each command to a handler using one injected port
+// per side effect (db, sources, git, ask, daemon, mcp) plus the output sink.
+// Bundling these into a struct would only relocate the same fan-out.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     cli: Cli,
     db: &Db,
     sources: &[Box<dyn SessionSource>],
     git: &dyn GitRunner,
     engine: &dyn AskEngine,
+    daemon: &dyn DaemonRunner,
+    mcp: &dyn McpRunner,
     out: &mut dyn Write,
 ) -> Result<()> {
     match cli.command {
@@ -343,14 +373,8 @@ pub fn dispatch(
             limit,
             json,
         }) => handle_ask(db, engine, &question, &scope.to_scope(), limit, json, out),
-        Some(Command::Serve) => {
-            writeln!(out, "serve: the indexing daemon is not available yet")?;
-            Ok(())
-        }
-        Some(Command::Mcp) => {
-            writeln!(out, "mcp: the MCP server is not available yet")?;
-            Ok(())
-        }
+        Some(Command::Serve) => daemon.serve(db, sources, git),
+        Some(Command::Mcp) => mcp.serve(db, engine),
         None => {
             writeln!(out, "csx {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
@@ -381,6 +405,39 @@ fn resolve_db_path_from(
         .unwrap_or_default()
         .join(".csx")
         .join("index.sqlite")
+}
+
+/// Resolve the daemon's Unix-socket path: `$CSX_SOCK` if set and non-empty, else
+/// `~/.csx/csx.sock`, else a relative `.csx/csx.sock` when `HOME` is unset.
+pub fn resolve_sock_path() -> std::path::PathBuf {
+    resolve_sock_path_from(std::env::var_os("CSX_SOCK"), std::env::var_os("HOME"))
+}
+
+/// Pure core of [`resolve_sock_path`], taking explicit environment values so the
+/// override and the `HOME`-relative fallback are deterministically testable.
+fn resolve_sock_path_from(
+    csx_sock: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    if let Some(p) = csx_sock {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    home.map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".csx")
+        .join("csx.sock")
+}
+
+/// The set of filesystem roots the daemon should watch: each configured
+/// source's config directory, when it exposes one. Deduplication and existence
+/// are left to the watcher adapter (a missing root is watched benignly).
+pub fn watch_roots(sources: &[Box<dyn SessionSource>]) -> Vec<std::path::PathBuf> {
+    sources
+        .iter()
+        .filter_map(|s| s.config_dir().map(std::path::PathBuf::from))
+        .collect()
 }
 
 #[cfg(test)]
@@ -627,6 +684,32 @@ mod tests {
         }
     }
 
+    /// A daemon/MCP runner fake: both ports resolve to a recorded, side-effect
+    /// free `Ok(())`, so the `serve`/`mcp` dispatch arms are exercised without
+    /// binding sockets, watching the filesystem, or touching stdio.
+    #[derive(Default)]
+    struct FakeRunner {
+        served: std::cell::Cell<bool>,
+        mcp: std::cell::Cell<bool>,
+    }
+    impl DaemonRunner for FakeRunner {
+        fn serve(
+            &self,
+            _db: &Db,
+            _sources: &[Box<dyn SessionSource>],
+            _git: &dyn GitRunner,
+        ) -> Result<()> {
+            self.served.set(true);
+            Ok(())
+        }
+    }
+    impl McpRunner for FakeRunner {
+        fn serve(&self, _db: &Db, _engine: &dyn AskEngine) -> Result<()> {
+            self.mcp.set(true);
+            Ok(())
+        }
+    }
+
     fn as_str(buf: &[u8]) -> &str {
         std::str::from_utf8(buf).unwrap()
     }
@@ -645,6 +728,8 @@ mod tests {
             &srcs,
             &git,
             &engine,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -657,6 +742,8 @@ mod tests {
             &srcs,
             &git,
             &engine,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -671,6 +758,8 @@ mod tests {
             &srcs,
             &git,
             &engine,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -687,6 +776,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -707,6 +798,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -720,6 +813,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -736,6 +831,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -748,6 +845,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -766,6 +865,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -773,8 +874,10 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_serve_and_mcp_are_placeholders() {
+    fn dispatch_serve_and_mcp_route_to_their_runners() {
         let db = fixture_db();
+        let runner = FakeRunner::default();
+
         let mut buf = Vec::new();
         dispatch(
             parse(&["csx", "serve"]),
@@ -782,10 +885,14 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &runner,
+            &runner,
             &mut buf,
         )
         .unwrap();
-        assert!(as_str(&buf).contains("not available yet"));
+        assert!(runner.served.get(), "serve routed to the daemon runner");
+        assert!(!runner.mcp.get());
+        assert!(as_str(&buf).is_empty());
 
         let mut buf = Vec::new();
         dispatch(
@@ -794,10 +901,61 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &runner,
+            &runner,
             &mut buf,
         )
         .unwrap();
-        assert!(as_str(&buf).contains("not available yet"));
+        assert!(runner.mcp.get(), "mcp routed to the MCP runner");
+        assert!(as_str(&buf).is_empty());
+    }
+
+    /// A runner whose ports both fail, proving dispatch propagates a runner
+    /// error rather than swallowing it.
+    #[test]
+    fn dispatch_serve_and_mcp_propagate_runner_errors() {
+        struct FailRunner;
+        impl DaemonRunner for FailRunner {
+            fn serve(
+                &self,
+                _db: &Db,
+                _sources: &[Box<dyn SessionSource>],
+                _git: &dyn GitRunner,
+            ) -> Result<()> {
+                Err(Error::other("daemon boom"))
+            }
+        }
+        impl McpRunner for FailRunner {
+            fn serve(&self, _db: &Db, _engine: &dyn AskEngine) -> Result<()> {
+                Err(Error::other("mcp boom"))
+            }
+        }
+        let db = fixture_db();
+        let err = dispatch(
+            parse(&["csx", "serve"]),
+            &db,
+            &no_sources(),
+            &NoGit,
+            &UnavailableAsk,
+            &FailRunner,
+            &FailRunner,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("daemon boom"));
+
+        let err = dispatch(
+            parse(&["csx", "mcp"]),
+            &db,
+            &no_sources(),
+            &NoGit,
+            &UnavailableAsk,
+            &FailRunner,
+            &FailRunner,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mcp boom"));
     }
 
     #[test]
@@ -823,6 +981,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &FakeAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -840,6 +1000,8 @@ mod tests {
             &no_sources(),
             &NoGit,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -894,6 +1056,8 @@ mod tests {
             &srcs,
             &git,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -909,6 +1073,8 @@ mod tests {
             &srcs,
             &git,
             &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
             &mut buf,
         )
         .unwrap();
@@ -937,6 +1103,51 @@ mod tests {
         );
         // The env-reading wrapper resolves to something ending in the db file.
         assert!(resolve_db_path().ends_with("index.sqlite") || resolve_db_path().is_absolute());
+    }
+
+    #[test]
+    fn resolve_sock_path_from_covers_both_branches() {
+        use std::ffi::OsString;
+        // An explicit, non-empty CSX_SOCK wins outright.
+        assert_eq!(
+            resolve_sock_path_from(Some(OsString::from("/run/csx.sock")), None),
+            std::path::PathBuf::from("/run/csx.sock")
+        );
+        // An empty CSX_SOCK is ignored, falling back to HOME-relative.
+        assert_eq!(
+            resolve_sock_path_from(Some(OsString::from("")), Some(OsString::from("/home/x"))),
+            std::path::PathBuf::from("/home/x/.csx/csx.sock")
+        );
+        // No CSX_SOCK, no HOME: relative default.
+        assert_eq!(
+            resolve_sock_path_from(None, None),
+            std::path::PathBuf::from(".csx/csx.sock")
+        );
+        // The env-reading wrapper resolves to the socket file or an absolute path.
+        assert!(resolve_sock_path().ends_with("csx.sock") || resolve_sock_path().is_absolute());
+    }
+
+    #[test]
+    fn watch_roots_collects_source_config_dirs() {
+        use crate::source::{ClaudeSource, CodexSource};
+        // Two real sources that expose a config dir, plus `OneShotSource` which
+        // uses the trait default (`None`), so the `filter_map` drops it. Reusing
+        // fakes whose other methods are already covered elsewhere keeps this
+        // test from introducing new, unexercised trait impls.
+        let sources: Vec<Box<dyn SessionSource>> = vec![
+            Box::new(ClaudeSource::new("/a/.claude")),
+            Box::new(OneShotSource),
+            Box::new(CodexSource::new("/b/.codex")),
+        ];
+        assert_eq!(
+            watch_roots(&sources),
+            vec![
+                std::path::PathBuf::from("/a/.claude"),
+                std::path::PathBuf::from("/b/.codex"),
+            ]
+        );
+        // No sources → nothing to watch.
+        assert!(watch_roots(&no_sources()).is_empty());
     }
 
     /// A writer that fails on every write, to exercise the `?` error-propagation

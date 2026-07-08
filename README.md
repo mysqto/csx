@@ -221,13 +221,21 @@ daemon layers are tool-agnostic — adding a new tool is just a new adapter (see
 
 ## The daemon / MCP / RAG features
 
-- **Daemon (`serve`).** A file watcher feeds a debouncer that coalesces write
-  bursts into one incremental re-index; a Unix-socket listener answers scoped
-  query requests. All the coalescing and request logic is pure and unit-tested;
-  only the OS watcher and socket transport are thin adapters.
+Both `csx serve` and `csx mcp` are live: the CLI wires the real adapters onto
+the pure logic below. `serve` runs the file-watching daemon (an initial `sync`
+warms the index, then it watches and re-indexes as sessions change while a
+background thread answers socket queries); `mcp` runs the stdio JSON-RPC server.
+
+- **Daemon (`serve`).** A `notify`-backed file watcher over the configured
+  source roots feeds a debouncer that coalesces write bursts into one
+  incremental re-index; a Unix-socket listener answers scoped query requests on
+  a background thread. All the coalescing and request logic is pure and
+  unit-tested; only the OS watcher and socket transport are thin adapters. The
+  socket path is `$CSX_SOCK`, defaulting to `~/.csx/csx.sock`.
 - **MCP (`mcp`).** A pure JSON-RPC handler implements the `initialize`,
   `tools/list`, and `tools/call` methods over a line-delimited stdio transport,
-  exposing search / get-session / ask to agents.
+  exposing search / get-session / ask to agents. Point any MCP-capable client
+  at `csx mcp` as its stdio command.
 - **RAG (`ask`).** Hybrid retrieval (BM25 ⊕ vector cosine via RRF) → cited
   context assembly → a grounded chat completion → answer plus session
   citations. Vectors are stored as little-endian `f32` BLOBs and compared in
