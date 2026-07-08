@@ -24,11 +24,16 @@ you explicitly turn on the retrieval-augmented `ask` command.
 
 ```sh
 brew tap mysqto/csx https://github.com/mysqto/csx
+brew trust mysqto/csx        # newer Homebrew requires trusting a third-party tap
 brew install --cask csx
 ```
 
 The cask is regenerated with real checksums by each release
 (`.github/workflows/release.yml`), so it tracks the latest tag.
+
+> Recent Homebrew refuses to load a cask from an untrusted tap until you run
+> `brew trust <tap>` (a one-time consent). Skipping it yields "Refusing to load …
+> from untrusted tap"; `brew trust mysqto/csx` fixes it.
 
 ### Prebuilt binary
 
