@@ -13,6 +13,10 @@ const REMOTE_CONTROL_HINT: &str = "kitty: turn on allow_remote_control and liste
 pub struct Kitty {
     /// Remote-control socket, from `KITTY_LISTEN_ON` or `--kitty-socket`.
     pub socket: Option<String>,
+    /// The user's `TMPDIR`. kitty's `listen_on unix:${TMPDIR}/kitty` listens on
+    /// `<TMPDIR>/kitty-<pid>`. Never a shared default such as `/tmp`, where
+    /// another user could plant a socket.
+    pub tmpdir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,9 +84,9 @@ fn parse_entries(json: &str, procs: &ProcessTable) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// kitty's `listen_on unix:/tmp/kitty` really listens on `/tmp/kitty-<pid>`.
-fn pid_socket(pid: u32) -> String {
-    format!("unix:/tmp/kitty-{pid}")
+/// kitty's `listen_on unix:<dir>/kitty` really listens on `<dir>/kitty-<pid>`.
+fn pid_socket(tmpdir: &str, pid: u32) -> String {
+    format!("unix:{}/kitty-{pid}", tmpdir.trim_end_matches('/'))
 }
 
 fn kitten(ports: &Ports, socket: Option<&str>, sub: &[&str]) -> Result<String> {
@@ -105,13 +109,16 @@ impl Kitty {
         )
     }
 
-    /// Sockets to try, in order: the explicit one, else one per kitty pid,
-    /// else none (kitten's own default).
+    /// Sockets to try, in order: the explicit one, else one per kitty pid under
+    /// `TMPDIR`, else none (kitten's own default). No other path is probed.
     fn candidates(&self, pids: &[u32]) -> Vec<Option<String>> {
-        match (&self.socket, pids) {
-            (Some(s), _) => vec![Some(s.clone())],
-            (None, []) => vec![None],
-            (None, pids) => pids.iter().map(|p| Some(pid_socket(*p))).collect(),
+        let tmpdir = self.tmpdir.as_deref().filter(|t| !t.is_empty());
+        match (&self.socket, tmpdir, pids) {
+            (Some(s), _, _) => vec![Some(s.clone())],
+            (None, Some(t), pids) if !pids.is_empty() => {
+                pids.iter().map(|p| Some(pid_socket(t, *p))).collect()
+            }
+            _ => vec![None],
         }
     }
 
@@ -324,6 +331,7 @@ mod tests {
         };
         let k = Kitty {
             socket: socket.map(String::from),
+            tmpdir: None,
         };
         let r = f(&k, &ports);
         (r, cmd.calls.into_inner(), osa.0.into_inner())
@@ -340,7 +348,14 @@ mod tests {
             "ps -axo pid=,ppid=,pgid=,tpgid=,tty=,etime=,args="
         );
         assert_eq!(calls.len(), 3);
-        assert_eq!(Kitty { socket: None }.id(), "kitty");
+        assert_eq!(
+            Kitty {
+                socket: None,
+                tmpdir: None,
+            }
+            .id(),
+            "kitty"
+        );
         assert_eq!(tabs.len(), 4);
         let t = &tabs[0];
         assert_eq!(t.terminal, "kitty");
@@ -375,7 +390,12 @@ mod tests {
             tty: &NoTty,
             sleep: &NoSleep,
         };
-        let e = Kitty { socket: None }.list(&ports).unwrap_err();
+        let e = Kitty {
+            socket: None,
+            tmpdir: None,
+        }
+        .list(&ports)
+        .unwrap_err();
         assert!(e.to_string().contains("kitten @ ls"));
     }
 
@@ -444,7 +464,10 @@ mod tests {
 
     #[test]
     fn command_failures_propagate() {
-        let k = Kitty { socket: None };
+        let k = Kitty {
+            socket: None,
+            tmpdir: None,
+        };
         assert!(errs("ps ", |p| k.list(p).map(|_| true)));
         assert!(errs("ps ", |p| k.focus_tty(p, "ttys001")));
         assert!(errs("focus-window", |p| k
@@ -510,15 +533,18 @@ mod tests {
 
     #[test]
     fn list_tries_each_pid_socket_until_one_answers() {
-        let k = Kitty { socket: None };
-        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.list(p));
+        let k = Kitty {
+            socket: None,
+            tmpdir: Some("/var/t/".into()),
+        };
+        let (r, calls) = with_pids("31\n42\n", "/var/t/kitty-42", |p| k.list(p));
         assert_eq!(r.unwrap().unwrap().len(), 4);
         assert_eq!(
             &calls[..3],
             [
                 "pgrep -x kitty",
-                "kitten @ --to unix:/tmp/kitty-31 ls",
-                "kitten @ --to unix:/tmp/kitty-42 ls"
+                "kitten @ --to unix:/var/t/kitty-31 ls",
+                "kitten @ --to unix:/var/t/kitty-42 ls"
             ]
         );
         // When no pid socket answers, the error carries the hint and the last error.
@@ -531,6 +557,7 @@ mod tests {
     fn explicit_socket_beats_pid_sockets() {
         let k = Kitty {
             socket: Some("unix:/tmp/mine".into()),
+            tmpdir: None,
         };
         let (r, calls) = with_pids("31\n", "/tmp/mine", |p| k.list(p));
         r.unwrap().unwrap();
@@ -540,22 +567,25 @@ mod tests {
 
     #[test]
     fn focus_tries_pid_sockets_and_reuses_the_answering_one_for_focus_tty() {
-        let k = Kitty { socket: None };
-        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.focus(p, "kitty:12"));
+        let k = Kitty {
+            socket: None,
+            tmpdir: Some("/var/t".into()),
+        };
+        let (r, calls) = with_pids("31\n42\n", "/var/t/kitty-42", |p| k.focus(p, "kitty:12"));
         r.unwrap();
         assert_eq!(
             calls,
             [
                 "pgrep -x kitty",
-                "kitten @ --to unix:/tmp/kitty-31 focus-window --match id:12",
-                "kitten @ --to unix:/tmp/kitty-42 focus-window --match id:12"
+                "kitten @ --to unix:/var/t/kitty-31 focus-window --match id:12",
+                "kitten @ --to unix:/var/t/kitty-42 focus-window --match id:12"
             ]
         );
-        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.focus_tty(p, "ttys002"));
+        let (r, calls) = with_pids("31\n42\n", "/var/t/kitty-42", |p| k.focus_tty(p, "ttys002"));
         assert!(r.unwrap());
         assert_eq!(
             calls.last().unwrap(),
-            "kitten @ --to unix:/tmp/kitty-42 focus-window --match id:12"
+            "kitten @ --to unix:/var/t/kitty-42 focus-window --match id:12"
         );
         // Nothing answers: the focus error surfaces.
         let (r, _) = with_pids("31\n", "nothing", |p| k.focus(p, "kitty:12"));
@@ -566,6 +596,7 @@ mod tests {
     fn explicit_socket_focus_skips_pgrep() {
         let k = Kitty {
             socket: Some("unix:/tmp/mine".into()),
+            tmpdir: None,
         };
         let (r, calls) = with_pids("31\n", "/tmp/mine", |p| k.focus(p, "kitty:12"));
         r.unwrap();
@@ -577,18 +608,45 @@ mod tests {
 
     #[test]
     fn candidates_cover_every_branch() {
-        let none = Kitty { socket: None };
-        assert_eq!(none.candidates(&[]), [None]);
-        assert_eq!(
-            none.candidates(&[7]),
-            [Some("unix:/tmp/kitty-7".to_string())]
-        );
-        let some = Kitty {
-            socket: Some("s".into()),
+        let k = |socket: Option<&str>, tmpdir: Option<&str>| Kitty {
+            socket: socket.map(String::from),
+            tmpdir: tmpdir.map(String::from),
         };
-        assert_eq!(some.candidates(&[7]), [Some("s".to_string())]);
+        let one = |s: &str| vec![Some(s.to_string())];
+        // No TMPDIR (unset or empty): no default path is probed.
+        assert_eq!(k(None, None).candidates(&[7]), [None]);
+        assert_eq!(k(None, Some("")).candidates(&[7]), [None]);
+        // TMPDIR but no kitty pid: nothing to probe either.
+        assert_eq!(k(None, Some("/var/t")).candidates(&[]), [None]);
+        // TMPDIR with pids: one per pid, trailing slash trimmed.
+        assert_eq!(
+            k(None, Some("/var/t/")).candidates(&[7, 8]),
+            [
+                Some("unix:/var/t/kitty-7".to_string()),
+                Some("unix:/var/t/kitty-8".to_string())
+            ]
+        );
+        assert_eq!(
+            k(None, Some("/var/t")).candidates(&[7]),
+            one("unix:/var/t/kitty-7")
+        );
+        // An explicit socket always wins.
+        assert_eq!(k(Some("s"), Some("/var/t")).candidates(&[7]), one("s"));
         // No candidate at all keeps the default error.
         let e = Kitty::first_ok::<()>(vec![], |_| Ok(())).unwrap_err();
         assert!(e.to_string().contains("no kitty socket"));
+    }
+
+    #[test]
+    fn no_tmpdir_never_probes_a_default_path() {
+        let k = Kitty {
+            socket: None,
+            tmpdir: None,
+        };
+        let (r, calls) = with_pids("31\n", "kitten @ ls", |p| k.list(p));
+        r.unwrap().unwrap();
+        assert!(!calls
+            .iter()
+            .any(|c| c.contains("/tmp") || c.contains("--to")));
     }
 }

@@ -75,7 +75,7 @@ pub fn detect(
         }
         let same = picked
             .iter()
-            .position(|(a, q)| a.tool() == agent.tool() && p.tty.is_some() && q.tty == p.tty);
+            .position(|(a, q)| a.tool() == agent.tool() && q.tty == p.tty);
         match same {
             Some(i) if rank(p) < rank(picked[i].1) => picked[i] = (agent.as_ref(), p),
             Some(_) => {}

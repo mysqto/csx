@@ -24,13 +24,20 @@ pub struct ListOptions {
 }
 
 /// Every supported terminal backend: ghostty, iterm2, terminal, kitty, wezterm.
-pub fn backends(kitty_socket: Option<String>) -> Vec<Box<dyn TerminalBackend>> {
+///
+/// `kitty_socket` is an explicit kitty socket; `tmpdir` is the user's `TMPDIR`,
+/// under which kitty's per-pid sockets are looked for.
+pub fn backends(
+    kitty_socket: Option<String>,
+    tmpdir: Option<String>,
+) -> Vec<Box<dyn TerminalBackend>> {
     vec![
         Box::new(Ghostty),
         Box::new(ITerm2),
         Box::new(TerminalApp),
         Box::new(Kitty {
             socket: kitty_socket,
+            tmpdir,
         }),
         Box::new(WezTerm),
     ]
@@ -297,7 +304,7 @@ mod tests {
 
     #[test]
     fn backends_lists_every_terminal_in_order() {
-        let b = backends(Some("unix:/tmp/k".into()));
+        let b = backends(Some("unix:/tmp/k".into()), None);
         let ids: Vec<&str> = b.iter().map(|b| b.id()).collect();
         assert_eq!(ids, ["ghostty", "iterm2", "terminal", "kitty", "wezterm"]);
     }

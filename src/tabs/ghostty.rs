@@ -44,7 +44,8 @@ const LIST_JXA: &str = r#"(() => {
   } catch (e) {
     return "null";
   }
-  // Three Apple events return nested arrays [window][tab][terminal].
+  // Three Apple events return nested arrays [window][tab][terminal]. They are
+  // not atomic, so a terminal that opens or closes in between must not throw.
   const ids = g.windows.tabs.terminals.id();
   const names = g.windows.tabs.terminals.name();
   const cwds = g.windows.tabs.terminals.workingDirectory();
@@ -52,7 +53,7 @@ const LIST_JXA: &str = r#"(() => {
   ids.forEach((tabs, wi) => {
     tabs.forEach((terms, ti) => {
       terms.forEach((id, k) => {
-        out.push({ w: wi + 1, t: ti + 1, id: id, name: names[wi][ti][k], cwd: cwds[wi][ti][k] });
+        out.push({ w: wi + 1, t: ti + 1, id: id, name: names[wi]?.[ti]?.[k] ?? "", cwd: cwds[wi]?.[ti]?.[k] ?? "" });
       });
     });
   });
@@ -250,6 +251,8 @@ mod tests {
         assert!(script.contains("g.windows.tabs.terminals.id()"));
         assert!(script.contains("g.windows.tabs.terminals.name()"));
         assert!(script.contains("g.windows.tabs.terminals.workingDirectory()"));
+        assert!(script.contains(r#"names[wi]?.[ti]?.[k] ?? """#));
+        assert!(script.contains(r#"cwds[wi]?.[ti]?.[k] ?? """#));
         assert!(!script.contains("term.id()") && !script.contains("t.terminals()"));
         assert!(script.contains("try {") && script.contains("catch (e)"));
         assert!(r.ports().cmd.run("x", &[]).unwrap().is_empty());

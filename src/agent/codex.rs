@@ -120,13 +120,23 @@ fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
         .min_by_key(|r| r.started_ms)
 }
 
-/// The session id in `codex resume <id>`: the word after `resume`, when it
-/// looks like an id (letters, digits and dashes).
+/// True for a UUID: 8-4-4-4-12 hex digits.
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The session id in `codex resume [flags] <id>`: the first word after
+/// `resume` that does not start with `-`, when it is a UUID. Anything else
+/// (`--last`, a word of a prompt that says "resume") gives `None`.
 fn resume_id(args: &str) -> Option<&str> {
     let mut toks = args.split_whitespace();
     toks.by_ref().find(|t| *t == "resume")?;
-    toks.next()
-        .filter(|t| t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    toks.find(|t| !t.starts_with('-')).filter(|t| is_uuid(t))
 }
 
 /// The rollout whose file name ends with `-<id>.jsonl`, searched across every
@@ -338,23 +348,61 @@ mod tests {
 
     #[test]
     fn resume_id_parsing() {
-        assert_eq!(resume_id("codex resume abc-123"), Some("abc-123"));
-        assert_eq!(resume_id("/x/codex --yolo resume abc"), Some("abc"));
+        let u = "11111111-2222-3333-4444-555555555555";
+        assert_eq!(resume_id(&format!("codex resume {u}")), Some(u));
+        assert_eq!(resume_id(&format!("/x/codex --yolo resume {u}")), Some(u));
+        assert_eq!(resume_id(&format!("codex resume --yolo {u}")), Some(u));
         assert_eq!(resume_id("codex resume"), None);
+        assert_eq!(resume_id("codex resume --last"), None);
         assert_eq!(resume_id("codex resume ../x"), None);
+        assert_eq!(resume_id("codex resume abc-123"), None);
+        assert_eq!(resume_id("codex please resume the parser work"), None);
         assert_eq!(resume_id("codex"), None);
+        // Wrong group sizes or non-hex digits are not UUIDs.
+        assert!(!is_uuid("1111111-2222-3333-4444-555555555555"));
+        assert!(!is_uuid("1111111g-2222-3333-4444-555555555555"));
+        assert!(!is_uuid("11111111-2222-3333-4444"));
+    }
+
+    #[test]
+    fn codex_resume_flags_and_prompts_use_the_right_rule() {
+        let h = tmp("resume-flags");
+        let file = rollout(
+            &h,
+            "a",
+            "id-1",
+            "2026-07-04T13:44:00Z",
+            &user_line("fresh"),
+            0,
+        );
+        assert!(file.exists());
+        // `--last` and a prompt that says "resume" fall back to the start-time rule.
+        for args in ["codex resume --last", "codex please resume the parser work"] {
+            let info = CodexAgent.enrich(&resume_proc(args), &ctx(&h));
+            assert_eq!(info.session_id.as_deref(), Some("id-1"), "{args}");
+        }
+        // A UUID after a flag is the id, even when no rollout has it.
+        let info = CodexAgent.enrich(
+            &resume_proc("codex resume --yolo 99999999-aaaa-bbbb-cccc-dddddddddddd"),
+            &ctx(&h),
+        );
+        assert_eq!(
+            info.session_id.as_deref(),
+            Some("99999999-aaaa-bbbb-cccc-dddddddddddd")
+        );
+        assert_eq!(info.title, None);
     }
 
     #[test]
     fn codex_resume_finds_old_rollout_by_name() {
         let h = tmp("resume");
         // Started long before the process and 20 days old: the id still finds it.
-        let old = h.join("sessions/2026/06/10/rollout-2026-06-10T01-00-00-id-r1.jsonl");
+        let old = h.join("sessions/2026/06/10/rollout-2026-06-10T01-00-00-11111111-2222-3333-4444-555555555555.jsonl");
         fs::create_dir_all(old.parent().unwrap()).unwrap();
-        let meta = "{\"timestamp\":\"2026-06-10T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"id-r1\",\"cwd\":\"/w/r\"}}\n";
+        let meta = "{\"timestamp\":\"2026-06-10T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"11111111-2222-3333-4444-555555555555\",\"cwd\":\"/w/r\"}}\n";
         fs::write(&old, format!("{meta}{}", user_line("resumed work"))).unwrap();
         // A newer copy of the same session wins; a different id is ignored.
-        let newer = h.join("sessions/2026/07/04/rollout-2026-07-04T01-00-00-id-r1.jsonl");
+        let newer = h.join("sessions/2026/07/04/rollout-2026-07-04T01-00-00-11111111-2222-3333-4444-555555555555.jsonl");
         fs::create_dir_all(newer.parent().unwrap()).unwrap();
         fs::write(&newer, format!("{meta}{}", user_line("newest copy"))).unwrap();
         fs::File::options()
@@ -366,15 +414,24 @@ mod tests {
         rollout(&h, "other-id-r2", "id-r2", "2026-07-04T13:44:00Z", "", 0);
         // A matching name with a broken header is skipped.
         fs::write(
-            h.join("sessions/2026/07/04/rollout-x-id-r1.jsonl"),
+            h.join("sessions/2026/07/04/rollout-x-11111111-2222-3333-4444-555555555555.jsonl"),
             "not json\n",
         )
         .unwrap();
-        let info = CodexAgent.enrich(&resume_proc("codex resume id-r1"), &ctx(&h));
-        assert_eq!(info.session_id.as_deref(), Some("id-r1"));
+        let info = CodexAgent.enrich(
+            &resume_proc("codex resume 11111111-2222-3333-4444-555555555555"),
+            &ctx(&h),
+        );
+        assert_eq!(
+            info.session_id.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
         assert_eq!(info.title.as_deref(), Some("newest copy"));
         assert_eq!(info.cwd.as_deref(), Some("/w/r"));
-        assert_eq!(info.resume_command.as_deref(), Some("codex resume id-r1"));
+        assert_eq!(
+            info.resume_command.as_deref(),
+            Some("codex resume 11111111-2222-3333-4444-555555555555")
+        );
         assert!(info.updated_at.is_some());
     }
 
@@ -383,9 +440,18 @@ mod tests {
         let h = tmp("resume-missing");
         // A rollout that fits the start-time rule must not be used instead.
         rollout(&h, "a", "id-other", "2026-07-04T13:44:00Z", "", 0);
-        let info = CodexAgent.enrich(&resume_proc("codex resume id-gone"), &ctx(&h));
-        assert_eq!(info.session_id.as_deref(), Some("id-gone"));
-        assert_eq!(info.resume_command.as_deref(), Some("codex resume id-gone"));
+        let info = CodexAgent.enrich(
+            &resume_proc("codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd"),
+            &ctx(&h),
+        );
+        assert_eq!(
+            info.session_id.as_deref(),
+            Some("99999999-aaaa-bbbb-cccc-dddddddddddd")
+        );
+        assert_eq!(
+            info.resume_command.as_deref(),
+            Some("codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd")
+        );
         assert_eq!(info.title, None);
         assert_eq!(info.cwd, None);
     }

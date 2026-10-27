@@ -227,7 +227,7 @@ A row can have no `ref`. You cannot focus it, but you can still copy from it.
 
 | Terminal     | List                                                  | Focus                                   | tty                         | Status |
 | ------------ | ----------------------------------------------------- | --------------------------------------- | --------------------------- | ------ |
-| Ghostty 1.3+ | AppleScript: windows, tabs, terminals                 | `focus` the terminal, then `activate`   | not reported (title marker) | Checked live |
+| Ghostty 1.3+ | AppleScript: windows, tabs, terminals                 | `focus` the terminal, then `activate`   | not reported (title marker) | Listing checked live |
 | Terminal.app | AppleScript: windows, tabs                            | select the tab, raise the window        | yes                         | Listing checked live with the app closed |
 | iTerm2       | AppleScript: windows, tabs, sessions                  | select the session, tab and window      | yes                         | Built from documentation, not tested live |
 | kitty        | `kitten @ ls` (needs remote control)                  | `kitten @ focus-window`, then activate  | from the foreground process | Built from documentation, not tested live |
@@ -242,15 +242,19 @@ restart kitty:
 
 ```
 allow_remote_control socket-only
-listen_on unix:/tmp/kitty
+listen_on unix:${TMPDIR}/kitty
 ```
 
-kitty adds its process id to the socket name, so the socket is really
-`/tmp/kitty-<pid>`. You do not need to know that. csx finds it in this order:
+kitty expands environment variables in `listen_on`. `TMPDIR` is a private
+folder for your user on macOS. kitty adds its process id to the socket name,
+so the socket is really `<TMPDIR>/kitty-<pid>`. You do not need to know that.
+csx finds the socket in this order:
 
 1. the `--kitty-socket` flag (also accepted by `csx tabs focus`),
 2. the `KITTY_LISTEN_ON` environment variable,
-3. `/tmp/kitty-<pid>` for each running kitty, using the first one that answers.
+3. `<TMPDIR>/kitty-<pid>` for each running kitty, using the first one that
+   answers. csx never looks in a shared folder such as `/tmp`. If `TMPDIR` is
+   not set, this step is skipped.
 
 Alfred does not pass `KITTY_LISTEN_ON`, so step 3 is what Alfred uses.
 

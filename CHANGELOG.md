@@ -22,7 +22,7 @@ _Nothing yet._
 - **`csx alfred install`** installs the Alfred workflow from the binary, keeps
   the keyword of the older Claude Tabs workflow and removes that workflow.
 - kitty sockets: `--kitty-socket` (also on `focus`), then `KITTY_LISTEN_ON`, then
-  `/tmp/kitty-<pid>` of each running kitty.
+  `<TMPDIR>/kitty-<pid>` of each running kitty.
 - Agents without a tty (such as `codex app-server`) are not listed. A resumed
   Codex session (`codex resume <id>`) gets its title from the rollout with that id.
 - macOS only. On other systems `csx tabs` prints an empty list.

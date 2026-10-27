@@ -98,7 +98,8 @@ impl RealTabs {
 
     fn backends(flag: Option<String>) -> Vec<Box<dyn crate::tabs::TerminalBackend>> {
         let env = std::env::var("KITTY_LISTEN_ON").ok();
-        crate::tabs::app::backends(crate::cli::resolve_kitty_socket(flag, env))
+        let tmpdir = std::env::var("TMPDIR").ok();
+        crate::tabs::app::backends(crate::cli::resolve_kitty_socket(flag, env), tmpdir)
     }
 }
 

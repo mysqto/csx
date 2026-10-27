@@ -215,8 +215,8 @@ pub enum Command {
         /// Emit Alfred script filter JSON.
         #[arg(long, conflicts_with = "json")]
         alfred: bool,
-        /// kitty remote-control socket, such as `unix:/tmp/kitty-1234`. Default:
-        /// `KITTY_LISTEN_ON`, else the `/tmp/kitty-<pid>` of each running kitty.
+        /// kitty remote-control socket, such as `unix:/var/folders/x/T/kitty-1234`. Default:
+        /// `KITTY_LISTEN_ON`, else the `<TMPDIR>/kitty-<pid>` of each running kitty.
         #[arg(long)]
         kitty_socket: Option<String>,
         /// Words that every listed row must match.
@@ -320,7 +320,7 @@ pub trait TabsRunner {
 }
 
 /// The kitty socket to use: the flag, else `KITTY_LISTEN_ON`; empty values
-/// count as unset. When both are unset, csx probes `/tmp/kitty-<pid>`.
+/// count as unset. When both are unset, csx probes `<TMPDIR>/kitty-<pid>`.
 pub fn resolve_kitty_socket(flag: Option<String>, env: Option<String>) -> Option<String> {
     flag.filter(|s| !s.is_empty())
         .or_else(|| env.filter(|s| !s.is_empty()))
