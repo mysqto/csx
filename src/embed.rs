@@ -76,9 +76,9 @@ pub fn decode_vec(bytes: &[u8]) -> Result<Vec<f32>> {
         )));
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
-        out.push(f32::from_le_bytes(arr));
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for chunk in chunks {
+        out.push(f32::from_le_bytes(*chunk));
     }
     Ok(out)
 }
