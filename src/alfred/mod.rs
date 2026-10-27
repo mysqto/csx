@@ -93,10 +93,12 @@ pub fn install(prefs: &Path) -> Result<InstallReport> {
     std::fs::create_dir_all(&dir)?;
     for (name, bytes) in FILES {
         let path = dir.join(name);
-        std::fs::write(&path, bytes)?;
+        let tmp = dir.join(format!(".{name}.tmp"));
+        std::fs::write(&tmp, bytes)?;
         if *name == "csx.sh" {
-            set_exec(&path)?;
+            set_exec(&tmp)?;
         }
+        std::fs::rename(&tmp, &path)?;
     }
     let mut report = InstallReport {
         dir: dir.clone(),
@@ -345,7 +347,46 @@ mod tests {
             let uid = format!("6C5D0A00-7A11-4B2E-9C3D-00000000000{n}");
             assert!(s.contains(&format!("<string>{uid}</string>")), "uid {n}");
         }
+        let uid = |n: u32| format!("6C5D0A00-7A11-4B2E-9C3D-00000000000{n}");
+        let expect = |src: u32, want: &[(u32, u32)]| {
+            let key = format!("<key>{}</key>", uid(src));
+            let at = s
+                .match_indices(&key)
+                .map(|(i, _)| i + key.len())
+                .find(|&i| s[i..].trim_start().starts_with("<array>"))
+                .unwrap_or_else(|| panic!("no connections for {src}"));
+            let body = &s[at..];
+            let body = &body[..body.find("</array>").unwrap()];
+            let mut got = vec![];
+            for chunk in body.split("<key>destinationuid</key>").skip(1) {
+                let dest = chunk
+                    .split("<string>")
+                    .nth(1)
+                    .unwrap()
+                    .split("</string>")
+                    .next()
+                    .unwrap();
+                let mods = chunk
+                    .split("<integer>")
+                    .nth(1)
+                    .unwrap()
+                    .split("</integer>")
+                    .next()
+                    .unwrap();
+                got.push((dest.to_string(), mods.parse::<u32>().unwrap()));
+            }
+            let want: Vec<(String, u32)> = want.iter().map(|(d, m)| (uid(*d), *m)).collect();
+            assert_eq!(got, want, "connections of {src}");
+        };
+        // A and B -> R (no modifier), C with Cmd and Option; H1 -> A, H2 -> B.
+        expect(1, &[(3, 0), (4, 1048576), (4, 524288)]);
+        expect(2, &[(3, 0), (4, 1048576), (4, 524288)]);
+        expect(5, &[(1, 0)]);
+        expect(6, &[(2, 0)]);
         assert_eq!(s.matches("<key>destinationuid</key>").count(), 8);
+        assert!(!s.contains("<key>hotkey</key>"));
+        assert!(s.contains("Copy the session id or folder"));
+        assert!(s.contains("Copy the resume command"));
         let (_, sh) = FILES.iter().find(|(n, _)| *n == "csx.sh").unwrap();
         assert!(sh.starts_with(b"#!/bin/sh"));
         let (_, png) = FILES.iter().find(|(n, _)| *n == "icon.png").unwrap();

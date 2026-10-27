@@ -26,7 +26,7 @@
 				<key>modifiers</key>
 				<integer>1048576</integer>
 				<key>modifiersubtext</key>
-				<string>Copy the session or tab id</string>
+				<string>Copy the session id or folder</string>
 				<key>vitoclose</key>
 				<false/>
 			</dict>
@@ -36,7 +36,7 @@
 				<key>modifiers</key>
 				<integer>524288</integer>
 				<key>modifiersubtext</key>
-				<string>Copy the session or tab id</string>
+				<string>Copy the resume command</string>
 				<key>vitoclose</key>
 				<false/>
 			</dict>
@@ -59,7 +59,7 @@
 				<key>modifiers</key>
 				<integer>1048576</integer>
 				<key>modifiersubtext</key>
-				<string>Copy the session or tab id</string>
+				<string>Copy the session id or folder</string>
 				<key>vitoclose</key>
 				<false/>
 			</dict>
@@ -69,7 +69,7 @@
 				<key>modifiers</key>
 				<integer>524288</integer>
 				<key>modifiersubtext</key>
-				<string>Copy the session or tab id</string>
+				<string>Copy the resume command</string>
 				<key>vitoclose</key>
 				<false/>
 			</dict>
@@ -220,12 +220,6 @@
 				<false/>
 				<key>focusedappvariablename</key>
 				<string></string>
-				<key>hotkey</key>
-				<integer>0</integer>
-				<key>hotmod</key>
-				<integer>0</integer>
-				<key>hotstring</key>
-				<string></string>
 				<key>leftcursor</key>
 				<false/>
 				<key>modsmode</key>
@@ -250,12 +244,6 @@
 				<key>focusedappvariable</key>
 				<false/>
 				<key>focusedappvariablename</key>
-				<string></string>
-				<key>hotkey</key>
-				<integer>0</integer>
-				<key>hotmod</key>
-				<integer>0</integer>
-				<key>hotstring</key>
 				<string></string>
 				<key>leftcursor</key>
 				<false/>
@@ -315,7 +303,9 @@
 	<key>readme</key>
 	<string>List terminal tabs (default keyword: tt) and AI coding sessions (default keyword: ct), and jump to one.
 
-Enter focuses the tab. Cmd+Enter or Option+Enter copies the id.
+Enter focuses the tab.
+
+Cmd+Enter copies the session id or folder. Option+Enter copies the resume command.
 
 The workflow calls csx. Install csx first. Set csx_path if csx is not in a standard folder.</string>
 	<key>uidata</key>
