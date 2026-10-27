@@ -173,6 +173,17 @@ pub fn is_tty_name(s: &str) -> bool {
         .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
+/// Write `bytes` to the tty `tty` through the port, after checking the name
+/// with [`is_tty_name`].
+pub fn write_tty(ports: &Ports, tty: &str, bytes: &[u8]) -> Result<()> {
+    if !is_tty_name(tty) {
+        return Err(crate::error::Error::other(format!(
+            "refusing to write to invalid tty name: {tty}"
+        )));
+    }
+    ports.tty.write(tty, bytes)
+}
+
 /// Sort rows: agent rows first, newest `updated_at` first (`None` last); then
 /// tabs by (terminal, window, index).
 pub fn sort_rows(rows: &mut [Row]) {
@@ -275,6 +286,49 @@ mod tests {
         for bad in ["../x", "tty", "ttys0/1", "", "pts1", "ttys 1", "../ttys1"] {
             assert!(!is_tty_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn write_tty_checks_name_then_writes() {
+        use std::cell::RefCell;
+        struct W(RefCell<Vec<(String, Vec<u8>)>>);
+        impl TtyWriter for W {
+            fn write(&self, tty: &str, bytes: &[u8]) -> Result<()> {
+                self.0.borrow_mut().push((tty.into(), bytes.to_vec()));
+                Ok(())
+            }
+        }
+        struct N;
+        impl OsaRunner for N {
+            fn run_jxa(&self, _: &str) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+        impl CommandRunner for N {
+            fn run(&self, _: &str, _: &[&str]) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+        impl Sleeper for N {
+            fn sleep_ms(&self, _: u64) {}
+        }
+        assert!(N.run_jxa("").unwrap().is_empty());
+        assert!(N.run("", &[]).unwrap().is_empty());
+        N.sleep_ms(0);
+        let w = W(RefCell::new(vec![]));
+        let ports = Ports {
+            osa: &N,
+            cmd: &N,
+            tty: &w,
+            sleep: &N,
+        };
+        write_tty(&ports, "ttys001", b"hi").unwrap();
+        let e = write_tty(&ports, "../etc/passwd", b"x").unwrap_err();
+        assert!(e.to_string().contains("invalid tty name"));
+        assert_eq!(
+            w.0.borrow().as_slice(),
+            &[("ttys001".to_string(), b"hi".to_vec())]
+        );
     }
 
     #[test]
