@@ -120,6 +120,40 @@ fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
         .min_by_key(|r| r.started_ms)
 }
 
+/// The session id in `codex resume <id>`: the word after `resume`, when it
+/// looks like an id (letters, digits and dashes).
+fn resume_id(args: &str) -> Option<&str> {
+    let mut toks = args.split_whitespace();
+    toks.by_ref().find(|t| *t == "resume")?;
+    toks.next()
+        .filter(|t| t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+/// The rollout whose file name ends with `-<id>.jsonl`, searched across every
+/// dated folder with no age limit. The most recently written one wins.
+fn find_rollout_by_id(ctx: &AgentContext, id: &str) -> Option<Rollout> {
+    let suffix = format!("-{id}.jsonl");
+    WalkDir::new(ctx.codex_home.join("sessions"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && is_rollout(e.path())
+                && e.file_name().to_string_lossy().ends_with(&suffix)
+        })
+        .filter_map(|e| {
+            let (id, cwd, started_ms) = read_header(e.path())?;
+            Some(Rollout {
+                id,
+                cwd,
+                started_ms,
+                mtime_ms: mtime_ms(e.path()).unwrap_or(0),
+                path: e.path().to_path_buf(),
+            })
+        })
+        .max_by_key(|r| r.mtime_ms)
+}
+
 /// True for context Codex injects as a user message, not typed by the user.
 /// A real prompt that starts with `<` is skipped too.
 fn is_injected(text: &str) -> bool {
@@ -160,8 +194,20 @@ impl Agent for CodexAgent {
 
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo {
         let mut info = base_info(self.tool(), p);
-        let start_ms = ctx.now_ms - (p.elapsed_secs as i64) * 1000;
-        let Some(r) = find_rollout(ctx, start_ms - START_SLACK_MS) else {
+        let found = match resume_id(&p.args) {
+            Some(id) => {
+                // A resumed session started before the process, so the id is
+                // the link. Without its rollout, keep the id alone.
+                info.session_id = Some(id.to_string());
+                info.resume_command = Some(format!("codex resume {id}"));
+                find_rollout_by_id(ctx, id)
+            }
+            None => {
+                let start_ms = ctx.now_ms - (p.elapsed_secs as i64) * 1000;
+                find_rollout(ctx, start_ms - START_SLACK_MS)
+            }
+        };
+        let Some(r) = found else {
             return info;
         };
         info.resume_command = Some(format!("codex resume {}", r.id));
@@ -281,6 +327,67 @@ mod tests {
         let info = CodexAgent.enrich(&proc(700), &ctx(&h));
         assert_eq!(info.session_id.as_deref(), Some("id-new"));
         assert_eq!(info.title.as_deref(), Some("second"));
+    }
+
+    fn resume_proc(args: &str) -> Process {
+        Process {
+            args: args.into(),
+            ..proc(100)
+        }
+    }
+
+    #[test]
+    fn resume_id_parsing() {
+        assert_eq!(resume_id("codex resume abc-123"), Some("abc-123"));
+        assert_eq!(resume_id("/x/codex --yolo resume abc"), Some("abc"));
+        assert_eq!(resume_id("codex resume"), None);
+        assert_eq!(resume_id("codex resume ../x"), None);
+        assert_eq!(resume_id("codex"), None);
+    }
+
+    #[test]
+    fn codex_resume_finds_old_rollout_by_name() {
+        let h = tmp("resume");
+        // Started long before the process and 20 days old: the id still finds it.
+        let old = h.join("sessions/2026/06/10/rollout-2026-06-10T01-00-00-id-r1.jsonl");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let meta = "{\"timestamp\":\"2026-06-10T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"id-r1\",\"cwd\":\"/w/r\"}}\n";
+        fs::write(&old, format!("{meta}{}", user_line("resumed work"))).unwrap();
+        // A newer copy of the same session wins; a different id is ignored.
+        let newer = h.join("sessions/2026/07/04/rollout-2026-07-04T01-00-00-id-r1.jsonl");
+        fs::create_dir_all(newer.parent().unwrap()).unwrap();
+        fs::write(&newer, format!("{meta}{}", user_line("newest copy"))).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000))
+            .unwrap();
+        rollout(&h, "other-id-r2", "id-r2", "2026-07-04T13:44:00Z", "", 0);
+        // A matching name with a broken header is skipped.
+        fs::write(
+            h.join("sessions/2026/07/04/rollout-x-id-r1.jsonl"),
+            "not json\n",
+        )
+        .unwrap();
+        let info = CodexAgent.enrich(&resume_proc("codex resume id-r1"), &ctx(&h));
+        assert_eq!(info.session_id.as_deref(), Some("id-r1"));
+        assert_eq!(info.title.as_deref(), Some("newest copy"));
+        assert_eq!(info.cwd.as_deref(), Some("/w/r"));
+        assert_eq!(info.resume_command.as_deref(), Some("codex resume id-r1"));
+        assert!(info.updated_at.is_some());
+    }
+
+    #[test]
+    fn codex_resume_without_rollout_keeps_the_id() {
+        let h = tmp("resume-missing");
+        // A rollout that fits the start-time rule must not be used instead.
+        rollout(&h, "a", "id-other", "2026-07-04T13:44:00Z", "", 0);
+        let info = CodexAgent.enrich(&resume_proc("codex resume id-gone"), &ctx(&h));
+        assert_eq!(info.session_id.as_deref(), Some("id-gone"));
+        assert_eq!(info.resume_command.as_deref(), Some("codex resume id-gone"));
+        assert_eq!(info.title, None);
+        assert_eq!(info.cwd, None);
     }
 
     #[test]

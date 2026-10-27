@@ -57,7 +57,8 @@ fn rank(p: &Process) -> (bool, u32) {
     (!p.is_foreground(), p.pid)
 }
 
-/// One [`AgentInfo`] per matching process. When several processes of the same
+/// One [`AgentInfo`] per matching process that has a tty (a daemon such as
+/// `codex app-server` has none and is not a session). When several processes of the same
 /// tool share a tty, keep the foreground one, else the lowest pid.
 pub fn detect(
     table: &ProcessTable,
@@ -69,6 +70,9 @@ pub fn detect(
         let Some(agent) = agents.iter().find(|a| a.matches(p)) else {
             continue;
         };
+        if p.tty.is_none() {
+            continue;
+        }
         let same = picked
             .iter()
             .position(|(a, q)| a.tool() == agent.tool() && p.tty.is_some() && q.tty == p.tty);
@@ -119,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_keeps_foreground_per_tty() {
+    fn detect_keeps_foreground_per_tty_and_skips_tty_less_processes() {
         let table = ProcessTable {
             procs: vec![
                 proc(30, 30, 99, Some("ttys1"), "claude"),
@@ -137,13 +141,7 @@ mod tests {
         let key: Vec<(&str, u32)> = got.iter().map(|a| (a.tool.as_str(), a.pid)).collect();
         assert_eq!(
             key,
-            vec![
-                ("claude-code", 40),
-                ("claude-code", 60),
-                ("codex", 70),
-                ("gemini", 80),
-                ("gemini", 81)
-            ]
+            vec![("claude-code", 40), ("claude-code", 60), ("codex", 70)]
         );
         assert_eq!(got[0].tty.as_deref(), Some("ttys1"));
     }

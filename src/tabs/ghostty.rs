@@ -44,11 +44,15 @@ const LIST_JXA: &str = r#"(() => {
   } catch (e) {
     return "null";
   }
+  // Three Apple events return nested arrays [window][tab][terminal].
+  const ids = g.windows.tabs.terminals.id();
+  const names = g.windows.tabs.terminals.name();
+  const cwds = g.windows.tabs.terminals.workingDirectory();
   const out = [];
-  g.windows().forEach((w, wi) => {
-    w.tabs().forEach((t, ti) => {
-      t.terminals().forEach((term) => {
-        out.push({ w: wi + 1, t: ti + 1, id: term.id(), name: term.name(), cwd: term.workingDirectory() });
+  ids.forEach((tabs, wi) => {
+    tabs.forEach((terms, ti) => {
+      terms.forEach((id, k) => {
+        out.push({ w: wi + 1, t: ti + 1, id: id, name: names[wi][ti][k], cwd: cwds[wi][ti][k] });
       });
     });
   });
@@ -242,6 +246,11 @@ mod tests {
         assert_eq!(tabs[1].tty, None);
         let script = r.osa.scripts.borrow()[0].clone();
         assert!(script.contains("running()"));
+        // Batched: no per-terminal property calls.
+        assert!(script.contains("g.windows.tabs.terminals.id()"));
+        assert!(script.contains("g.windows.tabs.terminals.name()"));
+        assert!(script.contains("g.windows.tabs.terminals.workingDirectory()"));
+        assert!(!script.contains("term.id()") && !script.contains("t.terminals()"));
         assert!(script.contains("try {") && script.contains("catch (e)"));
         assert!(r.ports().cmd.run("x", &[]).unwrap().is_empty());
     }

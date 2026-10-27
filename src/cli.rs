@@ -110,6 +110,9 @@ pub enum TabsAction {
     Focus {
         /// A ref from `csx tabs`, such as `ghostty:<id>` or `tty:ttys012`.
         tab_ref: String,
+        /// kitty remote-control socket, such as `unix:/tmp/kitty`.
+        #[arg(long)]
+        kitty_socket: Option<String>,
     },
 }
 
@@ -212,7 +215,8 @@ pub enum Command {
         /// Emit Alfred script filter JSON.
         #[arg(long, conflicts_with = "json")]
         alfred: bool,
-        /// kitty remote-control socket, such as `unix:/tmp/kitty`.
+        /// kitty remote-control socket, such as `unix:/tmp/kitty-1234`. Default:
+        /// `KITTY_LISTEN_ON`, else the `/tmp/kitty-<pid>` of each running kitty.
         #[arg(long)]
         kitty_socket: Option<String>,
         /// Words that every listed row must match.
@@ -308,27 +312,52 @@ pub trait TabsRunner {
     fn list(&self, db: &Db, opts: &ListOptions, kitty_socket: Option<String>)
         -> Result<TabsReport>;
     /// Focus the tab named by `tab_ref`.
-    fn focus(&self, tab_ref: &str) -> Result<()>;
+    fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()>;
     /// Install or update the Alfred workflow; `prefs` overrides discovery.
     fn alfred_install(&self, prefs: Option<PathBuf>) -> Result<InstallReport>;
+    /// The user's home directory, when known; used to shorten paths.
+    fn home(&self) -> Option<PathBuf>;
 }
 
-/// Build the agent context from explicit environment values: `~/.claude`, then
-/// the Claude config dirs the index knows, then `CLAUDE_CONFIG_DIR`; the Codex
-/// home is `CODEX_HOME` or `~/.codex`. Duplicates are left to the consumer.
+/// The kitty socket to use: the flag, else `KITTY_LISTEN_ON`; empty values
+/// count as unset. When both are unset, csx probes `/tmp/kitty-<pid>`.
+pub fn resolve_kitty_socket(flag: Option<String>, env: Option<String>) -> Option<String> {
+    flag.filter(|s| !s.is_empty())
+        .or_else(|| env.filter(|s| !s.is_empty()))
+}
+
+/// What `AgentContext::home` holds when the home directory is unknown. It does
+/// not exist, so nothing is read through a path built from it.
+const NO_HOME: &str = "/nonexistent";
+
+/// Build the agent context from explicit environment values. Empty values count
+/// as unset. Claude dirs are `~/.claude`, then the dirs the index knows, then
+/// `CLAUDE_CONFIG_DIR`, without duplicates and in that order. The Codex home is
+/// `CODEX_HOME`, else `~/.codex`. With no home, nothing is derived from it:
+/// `~/.claude` is left out and the Codex home falls back to [`NO_HOME`].
 pub fn tabs_context(
-    home: PathBuf,
+    home: Option<PathBuf>,
     indexed_claude_dirs: Vec<String>,
     claude_config_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     now_ms: i64,
 ) -> crate::agent::AgentContext {
-    let mut claude_dirs = vec![home.join(".claude")];
-    claude_dirs.extend(indexed_claude_dirs.into_iter().map(PathBuf::from));
-    claude_dirs.extend(claude_config_dir);
-    let codex_home = codex_home.unwrap_or_else(|| home.join(".codex"));
+    let home = home.filter(|h| !h.as_os_str().is_empty());
+    let mut candidates: Vec<PathBuf> = home.iter().map(|h| h.join(".claude")).collect();
+    candidates.extend(indexed_claude_dirs.into_iter().map(PathBuf::from));
+    candidates.extend(claude_config_dir);
+    let mut claude_dirs: Vec<PathBuf> = Vec::new();
+    for dir in candidates {
+        if !dir.as_os_str().is_empty() && !claude_dirs.contains(&dir) {
+            claude_dirs.push(dir);
+        }
+    }
+    let codex_home = codex_home
+        .filter(|c| !c.as_os_str().is_empty())
+        .or_else(|| home.as_ref().map(|h| h.join(".codex")))
+        .unwrap_or_else(|| PathBuf::from(NO_HOME));
     crate::agent::AgentContext {
-        home,
+        home: home.unwrap_or_else(|| PathBuf::from(NO_HOME)),
         claude_dirs,
         codex_home,
         now_ms,
@@ -343,14 +372,16 @@ pub fn handle_tabs(
     opts: &ListOptions,
     kitty_socket: Option<String>,
     output: TabsOutput,
-    home: Option<&str>,
+    home: Option<&std::path::Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
     let report = tabs.list(db, opts, kitty_socket)?;
     let text = match output {
         TabsOutput::Human => render_human(&report),
         TabsOutput::Json => render_json(&report),
-        TabsOutput::Alfred => render_alfred_with_home(&report, home),
+        TabsOutput::Alfred => {
+            render_alfred_with_home(&report, home.and_then(std::path::Path::to_str))
+        }
     };
     writeln!(out, "{}", text.trim_end_matches('\n'))?;
     Ok(())
@@ -525,9 +556,13 @@ pub fn dispatch(
         Some(Command::Serve) => daemon.serve(db, sources, git),
         Some(Command::Mcp) => mcp.serve(db, engine),
         Some(Command::Tabs {
-            action: Some(TabsAction::Focus { tab_ref }),
+            action:
+                Some(TabsAction::Focus {
+                    tab_ref,
+                    kitty_socket,
+                }),
             ..
-        }) => tabs.focus(&tab_ref),
+        }) => tabs.focus(&tab_ref, kitty_socket),
         Some(Command::Tabs {
             action: None,
             agents,
@@ -547,7 +582,7 @@ pub fn dispatch(
                 terminals,
                 query,
             };
-            let home = std::env::var("HOME").ok();
+            let home = tabs.home();
             handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
         }
         Some(Command::Alfred {
@@ -1451,11 +1486,14 @@ mod tests {
         fn list(&self, _: &Db, _: &ListOptions, _: Option<String>) -> Result<TabsReport> {
             Err(Error::other("tabs should not be called"))
         }
-        fn focus(&self, _: &str) -> Result<()> {
+        fn focus(&self, _: &str, _: Option<String>) -> Result<()> {
             Err(Error::other("tabs should not be called"))
         }
         fn alfred_install(&self, _: Option<PathBuf>) -> Result<InstallReport> {
             Err(Error::other("tabs should not be called"))
+        }
+        fn home(&self) -> Option<PathBuf> {
+            None
         }
     }
 
@@ -1465,6 +1503,7 @@ mod tests {
         report: TabsReport,
         install: Option<InstallReport>,
         fail: bool,
+        home: Option<PathBuf>,
         seen: RefCell<Vec<String>>,
     }
     impl TabsRunner for FakeTabs {
@@ -1482,8 +1521,10 @@ mod tests {
             }
             Ok(self.report.clone())
         }
-        fn focus(&self, tab_ref: &str) -> Result<()> {
-            self.seen.borrow_mut().push(format!("focus {tab_ref}"));
+        fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()> {
+            self.seen
+                .borrow_mut()
+                .push(format!("focus {tab_ref} {kitty_socket:?}"));
             if self.fail {
                 return Err(Error::other("tabs boom"));
             }
@@ -1495,6 +1536,9 @@ mod tests {
                 return Err(Error::other("tabs boom"));
             }
             Ok(self.install.clone().unwrap())
+        }
+        fn home(&self) -> Option<PathBuf> {
+            self.home.clone()
         }
     }
 
@@ -1559,9 +1603,22 @@ mod tests {
                 "{:?}",
                 parse(&["csx", "tabs", "focus", "tty:ttys012"]).command
             ),
-            "Some(Tabs { action: Some(Focus { tab_ref: \"tty:ttys012\" }), agents: false, \
+            "Some(Tabs { action: Some(Focus { tab_ref: \"tty:ttys012\", kitty_socket: None }), agents: false, \
              terminals: [], json: false, alfred: false, kitty_socket: None, query: [] })"
         );
+        assert!(format!(
+            "{:?}",
+            parse(&[
+                "csx",
+                "tabs",
+                "focus",
+                "kitty:3",
+                "--kitty-socket",
+                "unix:/k"
+            ])
+            .command
+        )
+        .contains("kitty_socket: Some(\"unix:/k\") }"));
         // After a list flag, "focus" is an ordinary query word.
         let cli = parse(&["csx", "tabs", "--agents", "focus", "x"]);
         assert!(format!("{:?}", cli.command).contains("action: None"));
@@ -1644,7 +1701,21 @@ mod tests {
         let tabs = FakeTabs::default();
         let out = run_tabs(&["csx", "tabs", "focus", "ghostty:abc"], &tabs).unwrap();
         assert!(out.is_empty());
-        assert_eq!(*tabs.seen.borrow(), ["focus ghostty:abc"]);
+        run_tabs(
+            &[
+                "csx",
+                "tabs",
+                "focus",
+                "kitty:2",
+                "--kitty-socket",
+                "unix:/k",
+            ],
+            &tabs,
+        )
+        .unwrap();
+        assert_eq!(tabs.seen.borrow()[1], "focus kitty:2 Some(\"unix:/k\")");
+        tabs.seen.borrow_mut().truncate(1);
+        assert_eq!(*tabs.seen.borrow(), ["focus ghostty:abc None"]);
     }
 
     fn install_report(migrated: Option<&str>, removed_old: bool) -> InstallReport {
@@ -1699,19 +1770,54 @@ mod tests {
     fn no_tabs_fake_errors_on_every_port() {
         let db = fixture_db();
         assert!(NoTabs.list(&db, &ListOptions::default(), None).is_err());
-        assert!(NoTabs.focus("x").is_err());
+        assert!(NoTabs.focus("x", None).is_err());
         assert!(NoTabs.alfred_install(None).is_err());
+        assert_eq!(NoTabs.home(), None);
+    }
+
+    #[test]
+    fn alfred_output_shortens_the_runner_home() {
+        let mut report = one_tab_report();
+        report.rows[0].cwd = Some("/Users/me/proj".into());
+        let tabs = FakeTabs {
+            report,
+            home: Some(PathBuf::from("/Users/me")),
+            ..Default::default()
+        };
+        let out = run_tabs(&["csx", "tabs", "--alfred"], &tabs).unwrap();
+        assert!(out.contains("~/proj"), "{out}");
+        let tabs = FakeTabs {
+            report: tabs.report.clone(),
+            ..Default::default()
+        };
+        let out = run_tabs(&["csx", "tabs", "--alfred"], &tabs).unwrap();
+        assert!(
+            !out.contains("~/proj") && out.contains("/Users/me/proj"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn kitty_socket_flag_beats_env_and_empty_is_unset() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(resolve_kitty_socket(s("f"), s("e")), s("f"));
+        assert_eq!(resolve_kitty_socket(None, s("e")), s("e"));
+        assert_eq!(resolve_kitty_socket(s(""), s("e")), s("e"));
+        assert_eq!(resolve_kitty_socket(s(""), s("")), None);
+        assert_eq!(resolve_kitty_socket(None, None), None);
     }
 
     #[test]
     fn tabs_context_orders_dirs_and_defaults_codex_home() {
+        let home = Some(PathBuf::from("/h"));
         let ctx = tabs_context(
-            PathBuf::from("/h"),
-            vec!["/idx/.claude".into()],
+            home.clone(),
+            vec!["/idx/.claude".into(), "/h/.claude".into(), "".into()],
             Some(PathBuf::from("/env/claude")),
             None,
             42,
         );
+        // Duplicates and empty values are dropped; order is kept.
         assert_eq!(
             ctx.claude_dirs,
             [
@@ -1723,8 +1829,27 @@ mod tests {
         assert_eq!(ctx.codex_home, PathBuf::from("/h/.codex"));
         assert_eq!((ctx.home, ctx.now_ms), (PathBuf::from("/h"), 42));
 
-        let ctx = tabs_context(PathBuf::from("/h"), vec![], None, Some("/c".into()), 0);
+        let ctx = tabs_context(home.clone(), vec![], None, Some("/c".into()), 0);
         assert_eq!(ctx.claude_dirs, [PathBuf::from("/h/.claude")]);
+        assert_eq!(ctx.codex_home, PathBuf::from("/c"));
+
+        // Empty env values are ignored.
+        let ctx = tabs_context(home, vec![], Some("".into()), Some("".into()), 0);
+        assert_eq!(ctx.claude_dirs, [PathBuf::from("/h/.claude")]);
+        assert_eq!(ctx.codex_home, PathBuf::from("/h/.codex"));
+    }
+
+    #[test]
+    fn tabs_context_without_home_builds_no_relative_paths() {
+        for home in [None, Some(PathBuf::new())] {
+            let ctx = tabs_context(home, vec![], Some("/env/claude".into()), None, 1);
+            assert_eq!(ctx.claude_dirs, [PathBuf::from("/env/claude")]);
+            assert_eq!(ctx.codex_home, PathBuf::from("/nonexistent"));
+            assert_eq!(ctx.home, PathBuf::from("/nonexistent"));
+            assert!(ctx.codex_home.is_absolute() && ctx.home.is_absolute());
+        }
+        let ctx = tabs_context(None, vec![], None, Some("/c".into()), 1);
+        assert!(ctx.claude_dirs.is_empty());
         assert_eq!(ctx.codex_home, PathBuf::from("/c"));
     }
 }

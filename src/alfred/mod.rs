@@ -49,6 +49,22 @@ pub fn prefs_dir(cmd: &dyn CommandRunner, home: &Path) -> PathBuf {
         .join(PREFS_NAME)
 }
 
+/// The preferences folder to install into: `prefs` when given, else the one
+/// found for `home`. Without both, an error.
+pub fn resolve_prefs(
+    prefs: Option<PathBuf>,
+    cmd: &dyn CommandRunner,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    match (prefs, home) {
+        (Some(p), _) => Ok(p),
+        (None, Some(h)) => Ok(prefs_dir(cmd, h)),
+        (None, None) => Err(Error::other(
+            "cannot find the Alfred preferences: HOME is not set (use --prefs)",
+        )),
+    }
+}
+
 /// What `install` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallReport {
@@ -158,6 +174,27 @@ mod tests {
     }
     fn fake(r: std::result::Result<&str, ()>) -> Fake {
         Fake(r.map(String::from), RefCell::new(vec![]))
+    }
+
+    #[test]
+    fn resolve_prefs_prefers_flag_then_home_then_errors() {
+        let c = fake(Err(()));
+        let flag = Some(PathBuf::from("/p/Alfred.alfredpreferences"));
+        assert_eq!(
+            resolve_prefs(flag.clone(), &c, Some(Path::new("/h"))).unwrap(),
+            flag.clone().unwrap()
+        );
+        assert_eq!(
+            resolve_prefs(flag, &c, None).unwrap(),
+            PathBuf::from("/p/Alfred.alfredpreferences")
+        );
+        assert!(c.1.borrow().is_empty());
+        assert_eq!(
+            resolve_prefs(None, &c, Some(Path::new("/h"))).unwrap(),
+            PathBuf::from("/h/Library/Application Support/Alfred/Alfred.alfredpreferences")
+        );
+        let e = resolve_prefs(None, &c, None).unwrap_err();
+        assert!(e.to_string().contains("HOME is not set"));
     }
 
     fn tmp(name: &str) -> PathBuf {

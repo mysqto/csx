@@ -79,23 +79,26 @@ impl McpRunner for RealMcp {
 /// refuses the other actions.
 struct RealTabs;
 
+fn home_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
 #[cfg(target_os = "macos")]
 impl RealTabs {
-    fn context(db: &Db) -> crate::agent::AgentContext {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_default();
-        crate::cli::tabs_context(
-            home,
-            db.config_dirs("claude-code").unwrap_or_default(),
-            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
-            std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
-            now_ms,
-        )
+    /// The one place the real OS ports are built.
+    fn with_ports<T>(f: impl FnOnce(&crate::tabs::Ports) -> T) -> T {
+        use crate::tabs::os_shim::{RealCommand, RealOsa, RealSleeper, RealTty};
+        f(&crate::tabs::Ports {
+            osa: &RealOsa,
+            cmd: &RealCommand,
+            tty: &RealTty,
+            sleep: &RealSleeper,
+        })
+    }
+
+    fn backends(flag: Option<String>) -> Vec<Box<dyn crate::tabs::TerminalBackend>> {
+        let env = std::env::var("KITTY_LISTEN_ON").ok();
+        crate::tabs::app::backends(crate::cli::resolve_kitty_socket(flag, env))
     }
 }
 
@@ -107,47 +110,42 @@ impl TabsRunner for RealTabs {
         opts: &crate::tabs::app::ListOptions,
         kitty_socket: Option<String>,
     ) -> Result<crate::tabs::TabsReport> {
-        use crate::tabs::os_shim::{RealCommand, RealOsa, RealSleeper, RealTty};
-        let ports = crate::tabs::Ports {
-            osa: &RealOsa,
-            cmd: &RealCommand,
-            tty: &RealTty,
-            sleep: &RealSleeper,
-        };
-        Ok(crate::tabs::app::list(
-            &ports,
-            &crate::tabs::app::backends(kitty_socket),
-            &crate::agent::registry(),
-            &Self::context(db),
-            opts,
-        ))
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        let ctx = crate::cli::tabs_context(
+            self.home(),
+            db.config_dirs("claude-code").unwrap_or_default(),
+            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+            now_ms,
+        );
+        let backends = Self::backends(kitty_socket);
+        Ok(Self::with_ports(|ports| {
+            crate::tabs::app::list(ports, &backends, &crate::agent::registry(), &ctx, opts)
+        }))
     }
 
-    fn focus(&self, tab_ref: &str) -> Result<()> {
-        use crate::tabs::os_shim::{RealCommand, RealOsa, RealSleeper, RealTty};
-        let ports = crate::tabs::Ports {
-            osa: &RealOsa,
-            cmd: &RealCommand,
-            tty: &RealTty,
-            sleep: &RealSleeper,
-        };
-        crate::tabs::app::focus(&ports, &crate::tabs::app::backends(None), tab_ref)
+    fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()> {
+        let backends = Self::backends(kitty_socket);
+        Self::with_ports(|ports| crate::tabs::app::focus(ports, &backends, tab_ref))
     }
 
     fn alfred_install(
         &self,
         prefs: Option<std::path::PathBuf>,
     ) -> Result<crate::alfred::InstallReport> {
-        let dir = match prefs {
-            Some(p) => p,
-            None => {
-                let home = std::env::var_os("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_default();
-                crate::alfred::prefs_dir(&crate::tabs::os_shim::RealCommand, &home)
-            }
-        };
+        let dir = crate::alfred::resolve_prefs(
+            prefs,
+            &crate::tabs::os_shim::RealCommand,
+            self.home().as_deref(),
+        )?;
         crate::alfred::install(&dir)
+    }
+
+    fn home(&self) -> Option<std::path::PathBuf> {
+        home_from_env()
     }
 }
 
@@ -162,7 +160,7 @@ impl TabsRunner for RealTabs {
         Ok(crate::tabs::TabsReport::default())
     }
 
-    fn focus(&self, _tab_ref: &str) -> Result<()> {
+    fn focus(&self, _tab_ref: &str, _kitty_socket: Option<String>) -> Result<()> {
         Err(Error::other("csx tabs is supported on macOS only"))
     }
 
@@ -171,6 +169,10 @@ impl TabsRunner for RealTabs {
         _prefs: Option<std::path::PathBuf>,
     ) -> Result<crate::alfred::InstallReport> {
         Err(Error::other("csx tabs is supported on macOS only"))
+    }
+
+    fn home(&self) -> Option<std::path::PathBuf> {
+        home_from_env()
     }
 }
 

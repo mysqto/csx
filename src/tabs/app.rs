@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn list_unattached_agent_becomes_row() {
+    fn list_unattached_agent_becomes_row_and_tty_less_agent_is_dropped() {
         let l = log();
         let ps = format!("{}11 1 11 11 ?? 00:01 agent\n", ps_line(10, "ttys003"));
         let os = FakeOs::new(&l).answer("ps -axo", &ps);
@@ -391,14 +391,12 @@ mod tests {
         a.cwd = Some("/w".into());
         let b = vec![FakeBackend::new("iterm2", &l).boxed()];
         let r = run_list(&os, b, vec![agent(11, None, Some(10)), a], &opts());
-        assert_eq!(ids(&r.rows), ["tty:ttys003", "-"]);
+        assert_eq!(ids(&r.rows), ["tty:ttys003"]);
         let row = &r.rows[0];
         assert_eq!(row.terminal, "");
         assert_eq!(row.tty.as_deref(), Some("ttys003"));
         assert_eq!(row.cwd.as_deref(), Some("/w"));
         assert_eq!(row.title, "");
-        assert_eq!(r.rows[1].tty, None);
-        assert_eq!(r.rows[1].agent.as_ref().unwrap().pid, 11);
     }
 
     #[test]

@@ -80,31 +80,73 @@ fn parse_entries(json: &str, procs: &ProcessTable) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// kitty's `listen_on unix:/tmp/kitty` really listens on `/tmp/kitty-<pid>`.
+fn pid_socket(pid: u32) -> String {
+    format!("unix:/tmp/kitty-{pid}")
+}
+
+fn kitten(ports: &Ports, socket: Option<&str>, sub: &[&str]) -> Result<String> {
+    let mut args: Vec<&str> = vec!["@"];
+    if let Some(s) = socket {
+        args.extend(["--to", s]);
+    }
+    args.extend(sub);
+    ports.cmd.run("kitten", &args)
+}
+
 impl Kitty {
-    fn kitten(&self, ports: &Ports, sub: &[&str]) -> Result<String> {
-        let mut args: Vec<&str> = vec!["@"];
-        if let Some(s) = &self.socket {
-            args.extend(["--to", s]);
-        }
-        args.extend(sub);
-        ports.cmd.run("kitten", &args)
+    /// Pids of running kitty processes; `None` when kitty is not running.
+    fn pids(ports: &Ports) -> Option<Vec<u32>> {
+        let out = ports.cmd.run("pgrep", &["-x", "kitty"]).ok()?;
+        Some(
+            out.lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .collect(),
+        )
     }
 
-    /// `None` when kitty is not running.
-    fn entries(&self, ports: &Ports) -> Result<Option<Vec<Entry>>> {
-        if ports.cmd.run("pgrep", &["-x", "kitty"]).is_err() {
+    /// Sockets to try, in order: the explicit one, else one per kitty pid,
+    /// else none (kitten's own default).
+    fn candidates(&self, pids: &[u32]) -> Vec<Option<String>> {
+        match (&self.socket, pids) {
+            (Some(s), _) => vec![Some(s.clone())],
+            (None, []) => vec![None],
+            (None, pids) => pids.iter().map(|p| Some(pid_socket(*p))).collect(),
+        }
+    }
+
+    /// Run `f` on each candidate socket; the first success wins and comes
+    /// back with its socket. When all fail, the last error.
+    fn first_ok<T>(
+        candidates: Vec<Option<String>>,
+        f: impl Fn(Option<&str>) -> Result<T>,
+    ) -> Result<(Option<String>, T)> {
+        let mut last = Error::other("no kitty socket to try");
+        for c in candidates {
+            match f(c.as_deref()) {
+                Ok(v) => return Ok((c, v)),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    /// The socket that answered and the entries; `None` when kitty is not
+    /// running.
+    fn entries(&self, ports: &Ports) -> Result<Option<(Option<String>, Vec<Entry>)>> {
+        let Some(pids) = Self::pids(ports) else {
             return Ok(None);
-        }
-        let out = self
-            .kitten(ports, &["ls"])
-            .map_err(|e| Error::other(format!("{REMOTE_CONTROL_HINT} (kitten: {e})")))?;
+        };
+        let (socket, out) =
+            Self::first_ok(self.candidates(&pids), |s| kitten(ports, s, &["ls"]))
+                .map_err(|e| Error::other(format!("{REMOTE_CONTROL_HINT} (kitten: {e})")))?;
         let procs = ProcessTable::load(ports.cmd)?;
-        parse_entries(&out, &procs).map(Some)
+        parse_entries(&out, &procs).map(|es| Some((socket, es)))
     }
 
-    fn focus_window(&self, ports: &Ports, id: u64) -> Result<()> {
+    fn focus_window(ports: &Ports, socket: Option<&str>, id: u64) -> Result<()> {
         let m = format!("id:{id}");
-        self.kitten(ports, &["focus-window", "--match", &m])?;
+        kitten(ports, socket, &["focus-window", "--match", &m])?;
         ports.osa.run_jxa(r#"Application("kitty").activate()"#)?;
         Ok(())
     }
@@ -118,7 +160,7 @@ impl TerminalBackend for Kitty {
     fn list(&self, ports: &Ports) -> Result<Option<Vec<Tab>>> {
         Ok(self
             .entries(ports)?
-            .map(|es| es.into_iter().map(|(_, t)| t).collect()))
+            .map(|(_, es)| es.into_iter().map(|(_, t)| t).collect()))
     }
 
     fn focus(&self, ports: &Ports, tab_ref: &str) -> Result<()> {
@@ -126,15 +168,26 @@ impl TerminalBackend for Kitty {
             .strip_prefix(REF_PREFIX)
             .and_then(|n| n.parse::<u64>().ok())
             .ok_or_else(|| Error::other(format!("kitty: bad tab ref {tab_ref}")))?;
-        self.focus_window(ports, id)
+        // An explicit socket needs no probing; otherwise find the pids.
+        let pids = if self.socket.is_some() {
+            Vec::new()
+        } else {
+            Self::pids(ports).unwrap_or_default()
+        };
+        let m = format!("id:{id}");
+        Self::first_ok(self.candidates(&pids), |s| {
+            kitten(ports, s, &["focus-window", "--match", &m])
+        })?;
+        ports.osa.run_jxa(r#"Application("kitty").activate()"#)?;
+        Ok(())
     }
 
     fn focus_tty(&self, ports: &Ports, tty: &str) -> Result<bool> {
-        let Some(entries) = self.entries(ports)? else {
+        let Some((socket, entries)) = self.entries(ports)? else {
             return Ok(false);
         };
         match entries.iter().find(|(_, t)| t.tty.as_deref() == Some(tty)) {
-            Some((id, _)) => self.focus_window(ports, *id).map(|_| true),
+            Some((id, _)) => Self::focus_window(ports, socket.as_deref(), *id).map(|_| true),
             None => Ok(false),
         }
     }
@@ -362,7 +415,10 @@ mod tests {
     fn focus_runs_cli_then_activates() {
         let (r, calls, osa) = run(true, true, None, |k, p| k.focus(p, "kitty:11"));
         r.unwrap();
-        assert_eq!(calls, vec!["kitten @ focus-window --match id:11"]);
+        assert_eq!(
+            calls,
+            vec!["pgrep -x kitty", "kitten @ focus-window --match id:11"]
+        );
         assert_eq!(osa, vec![r#"Application("kitty").activate()"#]);
     }
 
@@ -404,5 +460,135 @@ mod tests {
             sleep: &NoSleep,
         };
         assert!(k.focus(&ports, "kitty:1").is_err());
+    }
+
+    /// A command fake where kitty runs with `pids` and only `answers` replies.
+    struct Pids {
+        pids: &'static str,
+        answers: &'static str,
+        calls: RefCell<Vec<String>>,
+    }
+    impl CommandRunner for Pids {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String> {
+            let line = format!("{program} {}", args.join(" "));
+            self.calls.borrow_mut().push(line.clone());
+            match program {
+                "pgrep" => Ok(self.pids.into()),
+                "kitten" if line.contains(self.answers) => Ok(if line.contains(" ls") {
+                    FIXTURE.into()
+                } else {
+                    String::new()
+                }),
+                "kitten" => Err(Error::other("no such socket")),
+                _ => Ok("100 1 100 100 ttys001 01:00 -zsh\n\
+                         200 1 200 200 ttys002 01:00 /bin/vim\n"
+                    .into()),
+            }
+        }
+    }
+
+    fn with_pids<R>(
+        pids: &'static str,
+        answers: &'static str,
+        f: impl FnOnce(&Ports) -> R,
+    ) -> (R, Vec<String>) {
+        let cmd = Pids {
+            pids,
+            answers,
+            calls: RefCell::new(vec![]),
+        };
+        let osa = Osa(RefCell::new(vec![]));
+        let ports = Ports {
+            osa: &osa,
+            cmd: &cmd,
+            tty: &NoTty,
+            sleep: &NoSleep,
+        };
+        let r = f(&ports);
+        (r, cmd.calls.into_inner())
+    }
+
+    #[test]
+    fn list_tries_each_pid_socket_until_one_answers() {
+        let k = Kitty { socket: None };
+        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.list(p));
+        assert_eq!(r.unwrap().unwrap().len(), 4);
+        assert_eq!(
+            &calls[..3],
+            [
+                "pgrep -x kitty",
+                "kitten @ --to unix:/tmp/kitty-31 ls",
+                "kitten @ --to unix:/tmp/kitty-42 ls"
+            ]
+        );
+        // When no pid socket answers, the error carries the hint and the last error.
+        let (r, _) = with_pids("31\n42\n", "nothing", |p| k.list(p));
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("allow_remote_control") && e.contains("no such socket"));
+    }
+
+    #[test]
+    fn explicit_socket_beats_pid_sockets() {
+        let k = Kitty {
+            socket: Some("unix:/tmp/mine".into()),
+        };
+        let (r, calls) = with_pids("31\n", "/tmp/mine", |p| k.list(p));
+        r.unwrap().unwrap();
+        assert_eq!(calls[1], "kitten @ --to unix:/tmp/mine ls");
+        assert!(!calls.iter().any(|c| c.contains("kitty-31")));
+    }
+
+    #[test]
+    fn focus_tries_pid_sockets_and_reuses_the_answering_one_for_focus_tty() {
+        let k = Kitty { socket: None };
+        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.focus(p, "kitty:12"));
+        r.unwrap();
+        assert_eq!(
+            calls,
+            [
+                "pgrep -x kitty",
+                "kitten @ --to unix:/tmp/kitty-31 focus-window --match id:12",
+                "kitten @ --to unix:/tmp/kitty-42 focus-window --match id:12"
+            ]
+        );
+        let (r, calls) = with_pids("31\n42\n", "/tmp/kitty-42", |p| k.focus_tty(p, "ttys002"));
+        assert!(r.unwrap());
+        assert_eq!(
+            calls.last().unwrap(),
+            "kitten @ --to unix:/tmp/kitty-42 focus-window --match id:12"
+        );
+        // Nothing answers: the focus error surfaces.
+        let (r, _) = with_pids("31\n", "nothing", |p| k.focus(p, "kitty:12"));
+        assert!(r.unwrap_err().to_string().contains("no such socket"));
+    }
+
+    #[test]
+    fn explicit_socket_focus_skips_pgrep() {
+        let k = Kitty {
+            socket: Some("unix:/tmp/mine".into()),
+        };
+        let (r, calls) = with_pids("31\n", "/tmp/mine", |p| k.focus(p, "kitty:12"));
+        r.unwrap();
+        assert_eq!(
+            calls,
+            ["kitten @ --to unix:/tmp/mine focus-window --match id:12"]
+        );
+    }
+
+    #[test]
+    fn candidates_cover_every_branch() {
+        let none = Kitty { socket: None };
+        assert_eq!(none.candidates(&[]), [None]);
+        assert_eq!(
+            none.candidates(&[7]),
+            [Some("unix:/tmp/kitty-7".to_string())]
+        );
+        let some = Kitty {
+            socket: Some("s".into()),
+        };
+        assert_eq!(some.candidates(&[7]), [Some("s".to_string())]);
+        // No candidate at all keeps the default error.
+        let e = Kitty::first_ok::<()>(vec![], |_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("no kitty socket"));
     }
 }
