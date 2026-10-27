@@ -94,7 +94,13 @@ fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
         .max_by_key(|r| r.started_ms)
 }
 
-/// First user `input_text` of a `response_item`, cut to [`TITLE_CHARS`].
+/// True for context Codex injects as a user message, not typed by the user.
+fn is_injected(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with('<') || t.starts_with("# AGENTS.md")
+}
+
+/// First typed user `input_text` of a `response_item`, cut to [`TITLE_CHARS`].
 fn first_user_text(path: &Path) -> Option<String> {
     File::open(path)
         .into_iter()
@@ -110,7 +116,8 @@ fn first_user_text(path: &Path) -> Option<String> {
             parts
                 .iter()
                 .filter(|p| p["type"] == "input_text")
-                .find_map(|p| p["text"].as_str())
+                .filter_map(|p| p["text"].as_str())
+                .find(|t| !is_injected(t))
                 .map(|t| t.chars().take(TITLE_CHARS).collect())
         })
 }
@@ -295,6 +302,30 @@ mod tests {
         rollout(&h, "a", "id-1", "2026-07-04T13:44:00Z", extra, 0);
         let info = CodexAgent.enrich(&proc(100), &ctx(&h));
         assert_eq!(info.session_id.as_deref(), Some("id-1"));
+        assert_eq!(info.title, None);
+    }
+
+    #[test]
+    fn codex_title_skips_injected_context() {
+        let h = tmp("injected");
+        let extra = format!(
+            "{}{}{}",
+            user_line("  <environment_context>\\n  <cwd>/w</cwd>"),
+            user_line("# AGENTS.md instructions for /w"),
+            user_line("the real prompt"),
+        );
+        rollout(&h, "a", "id-1", "2026-07-04T13:44:00Z", &extra, 0);
+        let info = CodexAgent.enrich(&proc(100), &ctx(&h));
+        assert_eq!(info.title.as_deref(), Some("the real prompt"));
+        let only = format!(
+            "{}{}",
+            user_line("<user_instructions>x</user_instructions>"),
+            user_line("<environment_context>y")
+        );
+        let h2 = tmp("injected-only");
+        rollout(&h2, "a", "id-2", "2026-07-04T13:44:00Z", &only, 0);
+        let info = CodexAgent.enrich(&proc(100), &ctx(&h2));
+        assert_eq!(info.session_id.as_deref(), Some("id-2"));
         assert_eq!(info.title, None);
     }
 
