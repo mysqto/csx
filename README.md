@@ -350,7 +350,9 @@ knows how to (a) discover that tool's transcript files under a config root and
   database read-only (`SQLITE_OPEN_READ_ONLY` and `PRAGMA query_only`) and
   never writes to it. Each visible session is indexed on its own. Copies of a
   message that context compaction or a retry makes (same `message_id`) are
-  indexed once, and system prompts are skipped. Devin has no account object,
+  indexed once, and system prompts are skipped. A user-role message that
+  Devin did not mark `is_user_input` (text the person did not type) is stored
+  with role `system`, so `--role user` shows typed prompts only. Devin has no account object,
   so those sessions carry no attribution.
 
 Because every source normalizes to one schema, the index, search, RAG, MCP, and

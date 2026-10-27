@@ -13,6 +13,8 @@ All notable changes to csx are documented here. The format follows
   tool id `devin`, so `--tool devin` scopes queries to them. csx opens the
   database read-only and never writes to it. Messages that context compaction
   or a retry copies are indexed once, and system prompts are skipped.
+  User-role messages that Devin did not mark `is_user_input` are stored with
+  role `system`.
 - **`csx tabs` recognizes Devin.** A running `devin` process shows its session
   id, title, last prompt, working directory and last activity, and a resume
   command (`cd '<cwd>' && devin -r <id>`).

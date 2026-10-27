@@ -13,11 +13,14 @@
 //! Messages live in `message_nodes`, one JSON `chat_message` per node.
 //! Context compaction and retries copy a message into new nodes that keep the
 //! same `message_id`, so parsing builds the list of unique messages by first
-//! appearance. System prompts are skipped. The watermark is the number of
-//! unique messages already seen, so a reparse after a compaction adds nothing.
+//! appearance. System prompts are skipped, and a user-role message that
+//! Devin did not mark `is_user_input` is stored as a system message. The
+//! watermark is the number of unique messages already seen, so a reparse
+//! after a compaction adds nothing.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
@@ -29,6 +32,9 @@ use crate::source::{ParsedDelta, SessionFile, SessionSource};
 
 /// The `file_key` prefix that marks a Devin session.
 const KEY_PREFIX: &str = "devin:";
+
+/// How long a read waits for a lock held by Devin's writer.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Source adapter for Devin CLI sessions rooted at a data directory.
 #[derive(Debug, Clone)]
@@ -91,12 +97,13 @@ fn resolve_root(
 /// Open a Devin database read-only. The connection is opened with
 /// `SQLITE_OPEN_READ_ONLY`, so SQLite refuses every write, and
 /// `PRAGMA query_only` is a second guard. A missing file is an error; it is
-/// never created.
+/// never created. A busy timeout waits out a brief lock by Devin's writer.
 pub(crate) fn open_readonly(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch("PRAGMA query_only = ON")?;
     Ok(conn)
 }
@@ -275,7 +282,10 @@ fn message_records(
             cwd: cwd.map(str::to_string),
         };
     let (role, tool_name) = match str_field(msg, "role") {
-        Some("user") => (Role::User, None),
+        // Devin also writes user-role messages the person did not type; like
+        // Devin's own search, only `is_user_input` marks a typed prompt.
+        Some("user") if is_user_input(msg) => (Role::User, None),
+        Some("user") => (Role::System, None),
         Some("assistant") => (Role::Assistant, None),
         Some("tool") => (
             Role::Tool,
@@ -306,6 +316,16 @@ fn message_records(
         out.push(record(Role::Tool, name, uuid, args));
     }
     out
+}
+
+/// True when the message metadata marks it as typed by the person:
+/// `is_user_input` is `true` or `1`, the test Devin's own search uses.
+fn is_user_input(msg: &Value) -> bool {
+    match msg.pointer("/metadata/is_user_input") {
+        Some(Value::Bool(b)) => *b,
+        Some(v) => v.as_i64() == Some(1),
+        None => false,
+    }
 }
 
 /// Text of a message `content`: a string, or an array of parts that are
@@ -392,10 +412,15 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    /// A message as Devin writes it. User messages are marked as typed by
+    /// the person (`is_user_input: true`).
     fn msg(id: &str, role: &str, content: &str) -> Value {
         serde_json::json!({
             "message_id": id, "role": role, "content": content,
-            "metadata": {"created_at": "2026-07-04T10:00:00.123456Z"}
+            "metadata": {
+                "created_at": "2026-07-04T10:00:00.123456Z",
+                "is_user_input": if role == "user" { Value::Bool(true) } else { Value::Null }
+            }
         })
     }
 
@@ -456,6 +481,11 @@ pub(crate) mod tests {
         let ro = open_readonly(&root.join("sessions.db")).unwrap();
         let only: i64 = ro.query_row("PRAGMA query_only", [], |r| r.get(0)).unwrap();
         assert_eq!(only, 1);
+        // A brief lock by Devin's writer is waited out, not reported.
+        let busy: i64 = ro
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 2_000);
         let n: i64 = ro
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
@@ -613,6 +643,59 @@ pub(crate) mod tests {
         // The tool result has no metadata, so it falls back to node 7's time.
         assert_eq!(delta.messages[2].ts, 1_007);
         assert_eq!(meta.last_ts, m.ts);
+    }
+
+    #[test]
+    fn parse_user_messages_not_typed_by_the_person_become_system() {
+        let root = tmp("userinput");
+        let conn = fixture_db(&root);
+        let s = "keen-lynx";
+        add_session(&conn, s, "/work/acme/app", 10, 0);
+        let user = |id: &str, text: &str, flag: Value| {
+            serde_json::json!({"message_id": id, "role": "user", "content": text,
+                               "metadata": {"is_user_input": flag}})
+        };
+        add_node(&conn, s, 0, &msg("u1", "user", "typed question"), None);
+        add_node(&conn, s, 1, &user("u2", "injected null", Value::Null), None);
+        add_node(
+            &conn,
+            s,
+            2,
+            &user("u3", "injected false", Value::Bool(false)),
+            None,
+        );
+        add_node(
+            &conn,
+            s,
+            3,
+            &user("u4", "typed as one", serde_json::json!(1)),
+            None,
+        );
+        add_node(
+            &conn,
+            s,
+            4,
+            &serde_json::json!({"message_id": "u5", "role": "user", "content": "no metadata"}),
+            None,
+        );
+        drop(conn);
+        let src = DevinSource::new(&root);
+        let delta = src.parse(&file_for(&src, s), 0).unwrap();
+        let got: Vec<(Role, &str)> = delta
+            .messages
+            .iter()
+            .map(|m| (m.role, m.text.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Role::User, "typed question"),
+                (Role::System, "injected null"),
+                (Role::System, "injected false"),
+                (Role::User, "typed as one"),
+                (Role::System, "no metadata"),
+            ]
+        );
     }
 
     #[test]
