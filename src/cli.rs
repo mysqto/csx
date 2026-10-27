@@ -580,7 +580,12 @@ pub fn dispatch(
             let opts = ListOptions {
                 agents_only: agents,
                 terminals,
-                query,
+                // Alfred passes the whole query as one argument.
+                query: query
+                    .iter()
+                    .flat_map(|q| q.split_whitespace())
+                    .map(String::from)
+                    .collect(),
             };
             let home = tabs.home();
             handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
@@ -1623,6 +1628,31 @@ mod tests {
         let cli = parse(&["csx", "tabs", "--agents", "focus", "x"]);
         assert!(format!("{:?}", cli.command).contains("action: None"));
         assert!(format!("{:?}", cli.command).contains("query: [\"focus\", \"x\"]"));
+    }
+
+    #[test]
+    fn parses_tabs_query_after_double_dash() {
+        let cli = parse(&["csx", "tabs", "--agents", "--alfred", "--", "-x foo"]);
+        let text = format!("{:?}", cli.command);
+        assert!(text.contains("alfred: true") && text.contains("query: [\"-x foo\"]"));
+    }
+
+    #[test]
+    fn dispatch_tabs_splits_a_single_query_argument_into_words() {
+        let tabs = FakeTabs::default();
+        run_tabs(&["csx", "tabs", "--alfred", "--", "claude  parser"], &tabs).unwrap();
+        run_tabs(&["csx", "tabs", "a", "b c"], &tabs).unwrap();
+        let seen = tabs.seen.borrow();
+        assert!(
+            seen[0].contains("query: [\"claude\", \"parser\"]"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[1].contains("query: [\"a\", \"b\", \"c\"]"),
+            "{}",
+            seen[1]
+        );
     }
 
     #[test]

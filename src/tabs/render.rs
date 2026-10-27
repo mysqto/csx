@@ -110,8 +110,8 @@ struct AlfredOutput {
 
 #[derive(Serialize)]
 struct AlfredItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uid: Option<String>,
+    // No `uid`: Alfred would re-rank rows by what the user picked, and csx's
+    // order (agents by recent activity) must stay.
     title: String,
     subtitle: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +125,6 @@ impl AlfredItem {
     /// A row that only shows a message.
     fn message(title: &str) -> Self {
         AlfredItem {
-            uid: None,
             title: title.to_string(),
             subtitle: String::new(),
             arg: None,
@@ -215,10 +214,6 @@ fn alfred_item(r: &Row, home: Option<&str>) -> AlfredItem {
         .and_then(|a| a.resume_command.as_deref())
         .map(|c| Mod::copy("resume command", Some(c)));
     AlfredItem {
-        uid: r
-            .ref_
-            .clone()
-            .or_else(|| r.agent.as_ref().map(|a| format!("pid:{}", a.pid))),
         title: title(r).to_string(),
         subtitle: subtitle(r, home),
         arg: r.ref_.clone(),
@@ -338,7 +333,7 @@ mod tests {
         let items = alfred(&report(vec![busy, tab, idle, bare], &[]));
 
         let b = &items[0];
-        assert_eq!(b["uid"], "ghostty:7");
+        assert!(b.get("uid").is_none());
         assert_eq!(b["arg"], "ghostty:7");
         assert_eq!(b["valid"], true);
         assert_eq!(b["title"], "Fix parser");
@@ -353,14 +348,12 @@ mod tests {
         assert_eq!(b["mods"]["alt"]["valid"], true);
 
         let t = &items[1];
-        assert_eq!(t["uid"], "iterm2:a");
         assert_eq!(t["title"], "shell");
         assert_eq!(t["subtitle"], "iterm2 · ~");
         assert_eq!(t["mods"]["cmd"]["arg"], "/Users/me");
         assert!(t["mods"].get("alt").is_none());
 
         let i = &items[2];
-        assert_eq!(i["uid"], "pid:42");
         assert!(i.get("arg").is_none());
         assert_eq!(i["valid"], false);
         assert_eq!(i["title"], "gemini");
@@ -410,7 +403,8 @@ mod tests {
         let items = alfred(&report(rows, &["kitty: off"]));
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["title"], "kitty: off");
-        assert_eq!(items[1]["uid"], "iterm2:a");
+        assert_eq!(items[1]["arg"], "iterm2:a");
+        assert!(items.iter().all(|i| i.get("uid").is_none()));
     }
 
     #[test]

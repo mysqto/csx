@@ -139,7 +139,7 @@
 				<key>runningsubtext</key>
 				<string>Reading tabs…</string>
 				<key>script</key>
-				<string>./csx.sh tabs --alfred "$1"</string>
+				<string>./csx.sh tabs --alfred -- "$1"</string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
 				<key>scriptfile</key>
@@ -188,7 +188,7 @@
 				<key>runningsubtext</key>
 				<string>Reading tabs…</string>
 				<key>script</key>
-				<string>./csx.sh tabs --agents --alfred "$1"</string>
+				<string>./csx.sh tabs --agents --alfred -- "$1"</string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
 				<key>scriptfile</key>

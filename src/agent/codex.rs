@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use super::{base_info, Agent, AgentContext};
+use super::{base_info, is_uuid, Agent, AgentContext};
 use crate::source::claude::parse_iso8601_secs;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -120,16 +120,6 @@ fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
         .min_by_key(|r| r.started_ms)
 }
 
-/// True for a UUID: 8-4-4-4-12 hex digits.
-fn is_uuid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == 5
-        && parts
-            .iter()
-            .zip([8, 4, 4, 4, 12])
-            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
 /// The session id in `codex resume [flags] <id>`: the first word after
 /// `resume` that does not start with `-`, when it is a UUID. Anything else
 /// (`--last`, a word of a prompt that says "resume") gives `None`.
@@ -220,7 +210,7 @@ impl Agent for CodexAgent {
         let Some(r) = found else {
             return info;
         };
-        info.resume_command = Some(format!("codex resume {}", r.id));
+        info.resume_command = is_uuid(&r.id).then(|| format!("codex resume {}", r.id));
         info.title = first_user_text(&r.path);
         info.session_id = Some(r.id);
         info.cwd = r.cwd;
@@ -327,10 +317,8 @@ mod tests {
         assert_eq!(info.session_id.as_deref(), Some("id-newest"));
         assert_eq!(info.cwd.as_deref(), Some("/w/c"));
         assert_eq!(info.title.as_deref(), Some(&long[..80]));
-        assert_eq!(
-            info.resume_command.as_deref(),
-            Some("codex resume id-newest")
-        );
+        // "id-newest" is not a UUID, so no resume command is built.
+        assert_eq!(info.resume_command, None);
         assert_eq!(info.updated_at, Some(NOW_MS));
         // The older process maps to its own, earlier rollout.
         assert!(p.exists());
@@ -433,6 +421,15 @@ mod tests {
             Some("codex resume 11111111-2222-3333-4444-555555555555")
         );
         assert!(info.updated_at.is_some());
+    }
+
+    #[test]
+    fn codex_resume_command_needs_a_uuid_rollout_id() {
+        let h = tmp("crafted");
+        rollout(&h, "a", "x; rm -rf ~", "2026-07-04T13:44:00Z", "", 0);
+        let info = CodexAgent.enrich(&proc(100), &ctx(&h));
+        assert_eq!(info.session_id.as_deref(), Some("x; rm -rf ~"));
+        assert_eq!(info.resume_command, None);
     }
 
     #[test]

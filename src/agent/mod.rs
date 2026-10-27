@@ -9,6 +9,17 @@ use std::path::PathBuf;
 use crate::tabs::process::{Process, ProcessTable};
 use crate::tabs::AgentInfo;
 
+/// True for a UUID: 8-4-4-4-12 hex digits. Session ids are checked with this
+/// before they go into a command line that a user may paste.
+pub(crate) fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Where agents look for session data, and the current time.
 #[derive(Debug, Clone)]
 pub struct AgentContext {

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{base_info, Agent, AgentContext};
+use super::{base_info, is_uuid, Agent, AgentContext};
 use crate::tabs::process::Process;
 use crate::tabs::{AgentInfo, AgentStatus};
 
@@ -117,7 +117,8 @@ impl Agent for ClaudeAgent {
             if let Some(text) = read_tail(&path) {
                 tr = scan_transcript(&text);
             }
-            info.resume_command = Some(format!("cd {} && claude --resume {sid}", shell_quote(cwd)));
+            info.resume_command =
+                is_uuid(sid).then(|| format!("cd {} && claude --resume {sid}", shell_quote(cwd)));
         }
         info.title = tr
             .custom_title
@@ -164,7 +165,7 @@ mod tests {
         write(
             &dir.join(format!("sessions/{pid}.json")),
             &format!(
-                r#"{{"sessionId":"sid-1","cwd":"{cwd}","status":"{status}","name":"the name","updatedAt":1700000000123}}"#
+                r#"{{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444","cwd":"{cwd}","status":"{status}","name":"the name","updatedAt":1700000000123}}"#
             ),
         );
     }
@@ -174,7 +175,12 @@ mod tests {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        write(&dir.join(format!("projects/{slug}/sid-1.jsonl")), body);
+        write(
+            &dir.join(format!(
+                "projects/{slug}/aaaaaaaa-1111-2222-3333-444444444444.jsonl"
+            )),
+            body,
+        );
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -205,14 +211,17 @@ mod tests {
         assert_eq!(info.pid, 11);
         assert_eq!(info.tty.as_deref(), Some("ttys9"));
         assert_eq!(info.cwd.as_deref(), Some("/w/my.proj"));
-        assert_eq!(info.session_id.as_deref(), Some("sid-1"));
+        assert_eq!(
+            info.session_id.as_deref(),
+            Some("aaaaaaaa-1111-2222-3333-444444444444")
+        );
         assert_eq!(info.status, AgentStatus::Busy);
         assert_eq!(info.updated_at, Some(1_700_000_000_123));
         assert_eq!(info.title.as_deref(), Some("last ai"));
         assert_eq!(info.last_prompt.as_deref(), Some("p2"));
         assert_eq!(
             info.resume_command.as_deref(),
-            Some("cd '/w/my.proj' && claude --resume sid-1")
+            Some("cd '/w/my.proj' && claude --resume aaaaaaaa-1111-2222-3333-444444444444")
         );
         session(&d, 12, "/w/my.proj", "idle");
         let i = ClaudeAgent.enrich(&proc(12), &ctx(vec![d.clone()]));
@@ -299,8 +308,20 @@ mod tests {
         let info = ClaudeAgent.enrich(&proc(11), &ctx(vec![d]));
         assert_eq!(
             info.resume_command.as_deref(),
-            Some("cd '/w/it'\\''s here' && claude --resume sid-1")
+            Some("cd '/w/it'\\''s here' && claude --resume aaaaaaaa-1111-2222-3333-444444444444")
         );
+    }
+
+    #[test]
+    fn claude_resume_command_needs_a_uuid_session_id() {
+        let d = tmp("crafted");
+        write(
+            &d.join("sessions/11.json"),
+            r#"{"sessionId":"x; rm -rf ~","cwd":"/w/c","status":"idle"}"#,
+        );
+        let info = ClaudeAgent.enrich(&proc(11), &ctx(vec![d]));
+        assert_eq!(info.session_id.as_deref(), Some("x; rm -rf ~"));
+        assert_eq!(info.resume_command, None);
     }
 
     #[test]
