@@ -4,6 +4,20 @@ All notable changes to csx are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Devin CLI sessions are indexed.** `csx sync`, `serve` and `mcp` read
+  `~/.local/share/devin/cli/sessions.db` (or `$XDG_DATA_HOME/devin/cli`) with
+  tool id `devin`, so `--tool devin` scopes queries to them. csx opens the
+  database read-only and never writes to it. Messages that context compaction
+  or a retry copies are indexed once, and system prompts are skipped.
+- **`csx tabs` recognizes Devin.** A running `devin` process shows its session
+  id, title, last prompt, working directory and last activity, and a resume
+  command (`cd '<cwd>' && devin -r <id>`).
+- `csx-pick.fish` resumes Devin sessions with `devin -r <id>`.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

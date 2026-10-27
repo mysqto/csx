@@ -2,8 +2,8 @@
 
 **Fast local full-text + hybrid search over your AI-coding session transcripts.**
 
-`csx` indexes the transcripts that Claude Code and the Codex CLI leave on disk
-and makes them searchable from your terminal: full-text (BM25), code-substring
+`csx` indexes the transcripts that Claude Code, the Codex CLI and the Devin CLI
+leave on disk and makes them searchable from your terminal: full-text (BM25), code-substring
 (trigram), and hybrid semantic retrieval — all scoped by account, org, repo,
 tool, branch, working directory, role, and time. It runs entirely on your
 machine against an embedded SQLite database; nothing leaves your laptop unless
@@ -67,6 +67,7 @@ system SQLite dependency.
 | `CSX_DB`             | Path to the index database.                                    | `~/.csx/index.sqlite` |
 | `CLAUDE_CONFIG_DIR`  | Claude Code config root to index.                              | `~/.claude`           |
 | `CODEX_HOME`         | Codex CLI config root to index.                                | `~/.codex`            |
+| `XDG_DATA_HOME`      | Devin CLI data root is `$XDG_DATA_HOME/devin/cli` when set.     | `~/.local/share/devin/cli` |
 | `ANTHROPIC_API_KEY`  | Enables the `ask` command (RAG answers).                       | unset (ask disabled)  |
 | `CSX_CHAT_MODEL`     | Chat model `ask` uses when `ANTHROPIC_API_KEY` is set.         | `claude-opus-4-8`     |
 | `VOYAGE_API_KEY`     | Adds dense embeddings to `ask` for hybrid retrieval.           | unset (BM25 only)     |
@@ -188,7 +189,7 @@ these; they are ANDed together:
 | `--account <uuid>`| a source account UUID                                |
 | `--org <uuid>`    | a source organization UUID                           |
 | `--profile <name>`| a named profile                                      |
-| `--tool <id>`     | a tool: `claude-code` or `codex`                     |
+| `--tool <id>`     | a tool: `claude-code`, `codex` or `devin`            |
 | `--repo <id>`     | a repository id (normalized remote, root-commit, …)  |
 | `--cwd <path>`    | a session working directory / project path           |
 | `--branch <name>` | a git branch                                         |
@@ -203,7 +204,7 @@ these; they are ANDed together:
 ## Terminal tabs and Alfred
 
 `csx tabs` lists the tabs of your terminal apps. It also shows which tab
-runs an AI coding agent, such as Claude Code or Codex. You can then jump to
+runs an AI coding agent, such as Claude Code, Codex or Devin. You can then jump to
 any tab from the command line or from Alfred. This feature works on macOS
 only. On other systems `csx tabs` prints an empty list.
 
@@ -234,6 +235,19 @@ A row can have no `ref`. You cannot focus it, but you can still copy from it.
 | WezTerm      | `wezterm cli list --format json`                      | `wezterm cli activate-pane`             | yes                         | Built from documentation, not tested live |
 
 tmux panes are listed under the terminal tab that shows their client.
+
+### Supported agents
+
+| Agent (tool id)        | How csx finds the session                                      | Details shown |
+| ---------------------- | -------------------------------------------------------------- | ------------- |
+| Claude Code (`claude-code`) | `sessions/<pid>.json` in each Claude config dir           | session id, title, last prompt, busy or idle, working directory, resume command |
+| Codex (`codex`)        | the rollout that started with the process, or the `codex resume <id>` id | session id, title (first prompt), working directory, last activity, resume command |
+| Devin (`devin`)        | `session_locks/<id>.lock` that holds the process id, then `sessions.db` | session id, title, last prompt, working directory, last activity, resume command (`devin -r <id>`) |
+| gemini, opencode, copilot, cursor-agent, aider, qwen, goose, amp, crush, droid | process name only | tool, pid and tty |
+
+Devin data is read from `~/.local/share/devin/cli` (or
+`$XDG_DATA_HOME/devin/cli`). csx opens Devin's `sessions.db` read-only and
+never writes to it.
 
 ### kitty setup
 
@@ -319,7 +333,7 @@ elsewhere, set the `csx_path` workflow variable.
 `csx` treats each AI-coding tool as a **`SessionSource`** — an adapter that
 knows how to (a) discover that tool's transcript files under a config root and
 (b) incrementally parse them into the canonical `MessageRecord` /
-`SessionMeta` types. Two adapters ship today:
+`SessionMeta` types. Three adapters ship today:
 
 - **`ClaudeSource`** — reads `<root>/projects/<encoded-cwd>/*.jsonl` under
   `~/.claude` (or `CLAUDE_CONFIG_DIR`) — Claude Code writes one
@@ -331,6 +345,13 @@ knows how to (a) discover that tool's transcript files under a config root and
   `reasoning`, `function_call`, and `function_call_output` payloads onto the
   same schema. Codex has no account object, so those sessions carry no
   attribution.
+- **`DevinSource`** — reads `<root>/sessions.db` under
+  `~/.local/share/devin/cli` (or `$XDG_DATA_HOME/devin/cli`). csx opens the
+  database read-only (`SQLITE_OPEN_READ_ONLY` and `PRAGMA query_only`) and
+  never writes to it. Each visible session is indexed on its own. Copies of a
+  message that context compaction or a retry makes (same `message_id`) are
+  indexed once, and system prompts are skipped. Devin has no account object,
+  so those sessions carry no attribution.
 
 Because every source normalizes to one schema, the index, search, RAG, MCP, and
 daemon layers are tool-agnostic — adding a new tool is just a new adapter (see

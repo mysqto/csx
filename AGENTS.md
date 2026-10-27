@@ -2,7 +2,7 @@
 
 A guide for coding agents. Read it before touching this tree. `csx` is a local
 full-text + hybrid search engine over AI-coding session transcripts (Claude
-Code, Codex CLI). The whole design exists to keep one invariant true:
+Code, Codex CLI, Devin CLI). The whole design exists to keep one invariant true:
 
 > **Every real OS/network side effect sits behind a trait whose only real
 > implementation lives in a `*_shim.rs` file. All decision logic lives outside
@@ -82,6 +82,7 @@ one real adapter.
 | `source/mod.rs`     | `SessionSource` trait + `SessionFile` / `ParsedDelta`.               | `SessionSource` (adapters, no shim — read temp roots) |
 | `source/claude.rs`  | `ClaudeSource` adapter (`~/.claude`).                                | —                                       |
 | `source/codex.rs`   | `CodexSource` adapter (`~/.codex`).                                  | —                                       |
+| `source/devin.rs`   | `DevinSource` adapter (`~/.local/share/devin/cli/sessions.db`, opened read-only). | —                         |
 | `source/jsonl.rs`   | JSONL read helpers (whole-file + offset).                            | —                                       |
 | `source/fileid.rs`  | Stable file keys, size/mtime.                                        | —                                       |
 | `index.rs`          | `sync` — the incremental indexer (watermarks, repo resolution).      | —                                       |
@@ -108,6 +109,7 @@ one real adapter.
 | `tabs/render.rs`    | Pure human, JSON and Alfred rendering of a `TabsReport`.              | —                                       |
 | `tabs/os_shim.rs`   | `RealOsa`, `RealCommand`, `RealTty`, `RealSleeper`.                   | tab ports → **shim**                    |
 | `agent/*`           | `Agent` trait, `registry()`, `detect`; `claude.rs`, `codex.rs`, `generic.rs` (process-name agents). | consume `ProcessTable`   |
+| `agent/devin.rs`    | Devin agent: session from the pid lock file, details from `sessions.db` (read-only). | —                        |
 | `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/`. | consumes `CommandRunner` |
 
 Data flow: **sources → `index::sync` → `Db` (FTS5/trigram + `embeddings`
@@ -142,7 +144,7 @@ tool-specific fields; put tool quirks in the adapter, not the schema.
 ```rust
 pub struct MessageRecord {
     pub session_id: String,   // session this message belongs to
-    pub tool: Tool,           // Tool::ClaudeCode | Tool::Codex
+    pub tool: Tool,           // Tool::ClaudeCode | Tool::Codex | Tool::Devin
     pub seq: u64,             // 0-based monotonic order within the session
     pub ts: i64,              // unix seconds
     pub role: Role,           // User | Assistant | Tool | System
@@ -156,7 +158,7 @@ pub struct MessageRecord {
 Session-level aggregate is `SessionMeta` (`session_id`, `tool`,
 `project_path`, `repo_id`, `project_name`, `git_branch`, `account`, `first_ts`,
 `last_ts`). `Tool` and `Role` have stable lowercase string forms
-(`as_str`/`from_str`) — `claude-code`, `codex`; `user`, `assistant`, `tool`,
+(`as_str`/`from_str`) — `claude-code`, `codex`, `devin`; `user`, `assistant`, `tool`,
 `system` — and those strings are what land in storage and CLI flags. Keep them
 stable.
 
