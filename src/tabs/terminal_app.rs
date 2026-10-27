@@ -26,40 +26,41 @@ struct RawTab {
     custom_title: Option<String>,
 }
 
-const LIST_SCRIPT: &str = r#"
-const app = Application("Terminal");
-if (!app.running()) {
-  console.log("null");
-} else {
+const LIST_SCRIPT: &str = r#"(() => {
+  let app;
+  try {
+    app = Application("Terminal");
+    if (!app.running()) { return "null"; }
+  } catch (e) { return "null"; }
   const out = app.windows().map(w => ({
     id: w.id(),
     name: w.name(),
     tabs: w.tabs().map(t => ({tty: t.tty(), customTitle: t.customTitle() || null}))
   }));
-  console.log(JSON.stringify(out));
-}
-"#;
+  return JSON.stringify(out);
+})()"#;
 
 fn focus_script(window_id: u64, index: u64) -> String {
     format!(
-        r#"
-const app = Application("Terminal");
-let found = false;
-if (app.running()) {{
+        r#"(() => {{
+  let app;
+  try {{
+    app = Application("Terminal");
+    if (!app.running()) {{ return "false"; }}
+  }} catch (e) {{ return "false"; }}
   for (const w of app.windows()) {{
-    if (!found && w.id() === {window_id}) {{
+    if (w.id() === {window_id}) {{
       const tabs = w.tabs();
       if ({index} >= 1 && {index} <= tabs.length) {{
-        found = true;
         tabs[{index} - 1].selected = true;
         w.index = 1;
         app.activate();
+        return "true";
       }}
     }}
   }}
-}}
-console.log(JSON.stringify(found));
-"#
+  return "false";
+}})()"#
     )
 }
 
@@ -171,6 +172,18 @@ mod tests {
         }
     }
 
+    fn assert_script_shape(s: &str) {
+        assert!(!s.contains("console.log"));
+        assert!(s.trim_end().ends_with("})()"));
+        assert!(s.contains("catch (e) { return"));
+    }
+
+    #[test]
+    fn scripts_return_on_stdout_and_guard_missing_app() {
+        assert_script_shape(LIST_SCRIPT);
+        assert_script_shape(&focus_script(1, 1));
+    }
+
     const LISTING: &str = r#"[
       {"id":101,"name":"win one","tabs":[
         {"tty":"/dev/ttys001","customTitle":"build"},
@@ -218,6 +231,7 @@ mod tests {
         let osa = Osa::new(&["true\n"]);
         TerminalApp.focus(&ports(&osa), "terminal:101:2").unwrap();
         let s = osa.scripts.borrow()[0].clone();
+        assert_script_shape(&s);
         assert!(s.contains("w.id() === 101"));
         assert!(s.contains("tabs[2 - 1].selected = true"));
         assert!(s.contains("w.index = 1"));

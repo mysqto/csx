@@ -31,11 +31,12 @@ struct RawSession {
     path: Option<String>,
 }
 
-const LIST_SCRIPT: &str = r#"
-const app = Application("iTerm2");
-if (!app.running()) {
-  console.log("null");
-} else {
+const LIST_SCRIPT: &str = r#"(() => {
+  let app;
+  try {
+    app = Application("iTerm2");
+    if (!app.running()) { return "null"; }
+  } catch (e) { return "null"; }
   const out = app.windows().map(w => ({
     tabs: w.tabs().map(t => ({
       sessions: t.sessions().map(s => {
@@ -45,34 +46,34 @@ if (!app.running()) {
       })
     }))
   }));
-  console.log(JSON.stringify(out));
-}
-"#;
+  return JSON.stringify(out);
+})()"#;
 
 fn focus_script(session_id: &str) -> Result<String> {
     let id = serde_json::to_string(session_id)?;
     Ok(format!(
-        r#"
-const wanted = {id};
-const app = Application("iTerm2");
-let found = false;
-if (app.running()) {{
+        r#"(() => {{
+  const wanted = {id};
+  let app;
+  try {{
+    app = Application("iTerm2");
+    if (!app.running()) {{ return "false"; }}
+  }} catch (e) {{ return "false"; }}
   for (const w of app.windows()) {{
     for (const t of w.tabs()) {{
       for (const s of t.sessions()) {{
-        if (!found && s.id() === wanted) {{
-          found = true;
+        if (s.id() === wanted) {{
           s.select();
           t.select();
           w.select();
           app.activate();
+          return "true";
         }}
       }}
     }}
   }}
-}}
-console.log(JSON.stringify(found));
-"#
+  return "false";
+}})()"#
     ))
 }
 
@@ -183,6 +184,18 @@ mod tests {
         }
     }
 
+    fn assert_script_shape(s: &str) {
+        assert!(!s.contains("console.log"));
+        assert!(s.trim_end().ends_with("})()"));
+        assert!(s.contains("catch (e) { return"));
+    }
+
+    #[test]
+    fn scripts_return_on_stdout_and_guard_missing_app() {
+        assert_script_shape(LIST_SCRIPT);
+        assert_script_shape(&focus_script("x").unwrap());
+    }
+
     const LISTING: &str = r#"[
       {"tabs":[
         {"sessions":[
@@ -231,6 +244,7 @@ mod tests {
         let osa = Osa::new(&["true\n"]);
         ITerm2.focus(&ports(&osa), "iterm2:S\"1").unwrap();
         let s = osa.scripts.borrow()[0].clone();
+        assert_script_shape(&s);
         assert!(s.contains(r#"const wanted = "S\"1";"#));
         for call in ["s.select()", "t.select()", "w.select()", "app.activate()"] {
             assert!(s.contains(call), "{call}");
