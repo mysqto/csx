@@ -1890,4 +1890,20 @@ mod tests {
         assert_eq!(db.config_dirs("codex").unwrap(), vec!["/c/.codex"]);
         assert!(db.config_dirs("none").unwrap().is_empty());
     }
+
+    #[test]
+    fn config_dirs_errors() {
+        let db = Db::open(":memory:").unwrap();
+        db.conn().execute("DROP TABLE sources", []).unwrap();
+        assert!(db.config_dirs("x").is_err());
+
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sources (tool, config_dir) VALUES ('t', X'00')",
+                [],
+            )
+            .unwrap();
+        assert!(db.config_dirs("t").is_err());
+    }
 }

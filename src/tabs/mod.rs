@@ -102,7 +102,8 @@ pub trait CommandRunner {
 
 /// Port: write bytes to a tty device.
 pub trait TtyWriter {
-    /// Write `bytes` to the tty named `tty` (for example `ttys012`).
+    /// Write `bytes` to the tty named `tty` (for example `ttys012`). Callers
+    /// must check [`is_tty_name`] first.
     fn write(&self, tty: &str, bytes: &[u8]) -> Result<()>;
 }
 
@@ -136,7 +137,7 @@ pub trait TerminalBackend {
     fn focus_tty(&self, ports: &Ports, tty: &str) -> Result<bool>;
 }
 
-/// True when every lowercase query word appears in the joined searchable
+/// True when every query word (compared case-insensitively) appears in the joined searchable
 /// fields: title, cwd, terminal, agent tool, agent title, last prompt and
 /// session id. An empty query matches every row.
 pub fn matches_query(row: &Row, words: &[String]) -> bool {
@@ -149,7 +150,27 @@ pub fn matches_query(row: &Row, words: &[String]) -> bool {
         parts.extend(a.session_id.as_deref());
     }
     let hay = parts.join(" ").to_lowercase();
-    words.iter().all(|w| hay.contains(w.as_str()))
+    words.iter().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// Turn a finished command into a result: stdout (lossy UTF-8) on success, or
+/// an error naming `what` with the trimmed stderr on failure.
+pub fn exit_result(what: &str, success: bool, stdout: &[u8], stderr: &[u8]) -> Result<String> {
+    if success {
+        Ok(String::from_utf8_lossy(stdout).into_owned())
+    } else {
+        Err(crate::error::Error::other(format!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(stderr).trim()
+        )))
+    }
+}
+
+/// True only for `tty` followed by one or more ASCII letters or digits, for
+/// example `ttys012`. Guards writes to `/dev/<tty>`.
+pub fn is_tty_name(s: &str) -> bool {
+    s.strip_prefix("tty")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// Sort rows: agent rows first, newest `updated_at` first (`None` last); then
@@ -207,6 +228,7 @@ mod tests {
         assert!(matches_query(&r, &words("claude parser")));
         assert!(matches_query(&r, &words("tests abc-123")));
         assert!(matches_query(&r, &words("server")));
+        assert!(matches_query(&r, &words("GHOSTTY Parser")));
         assert!(!matches_query(&r, &words("csx missing")));
         let plain = tab("tmux", 1, 1, "x");
         assert!(!matches_query(&plain, &words("claude")));
@@ -237,6 +259,22 @@ mod tests {
             })
             .collect();
         assert_eq!(order, vec!["new", "old", "none", "g11", "g12", "g21", "t1"]);
+    }
+
+    #[test]
+    fn exit_result_success_and_failure() {
+        assert_eq!(exit_result("x", true, b"out\n", b"e").unwrap(), "out\n");
+        let e = exit_result("ps", false, b"o", b"  boom \n").unwrap_err();
+        assert_eq!(e.to_string(), "ps failed: boom");
+    }
+
+    #[test]
+    fn is_tty_name_cases() {
+        assert!(is_tty_name("ttys012"));
+        assert!(is_tty_name("tty1"));
+        for bad in ["../x", "tty", "ttys0/1", "", "pts1", "ttys 1", "../ttys1"] {
+            assert!(!is_tty_name(bad), "{bad}");
+        }
     }
 
     #[test]

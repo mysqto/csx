@@ -33,7 +33,7 @@ pub struct Process {
 }
 
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path.rsplit_once('/').map_or(path, |(_, b)| b)
 }
 
 /// True for `node`, `python3.12` and the other interpreters, by basename.

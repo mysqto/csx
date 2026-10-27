@@ -1,20 +1,13 @@
 //! Real adapters for the tab ports: osascript, subprocesses, tty devices and
 //! sleeping. No logic lives here.
 
-use super::{CommandRunner, OsaRunner, Sleeper, TtyWriter};
+use super::{exit_result, CommandRunner, OsaRunner, Sleeper, TtyWriter};
 use crate::error::{Error, Result};
 use std::io::Write;
 use std::process::{Command, Output};
 
-fn stdout_or_err(what: &str, out: Output) -> Result<String> {
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(Error::other(format!(
-            "{what} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )))
-    }
+fn finish(what: &str, out: Output) -> Result<String> {
+    exit_result(what, out.status.success(), &out.stdout, &out.stderr)
 }
 
 /// Runs JXA through `/usr/bin/osascript`.
@@ -25,7 +18,7 @@ impl OsaRunner for RealOsa {
         let out = Command::new("/usr/bin/osascript")
             .args(["-l", "JavaScript", "-e", script])
             .output()?;
-        stdout_or_err("osascript", out)
+        finish("osascript", out)
     }
 }
 
@@ -34,8 +27,11 @@ pub struct RealCommand;
 
 impl CommandRunner for RealCommand {
     fn run(&self, program: &str, args: &[&str]) -> Result<String> {
-        let out = Command::new(program).args(args).output()?;
-        stdout_or_err(program, out)
+        let out = Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|e| Error::other(format!("{program}: {e}")))?;
+        finish(program, out)
     }
 }
 
