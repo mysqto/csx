@@ -71,10 +71,36 @@ fn is_rollout(path: &Path) -> bool {
     name.starts_with("rollout-") && name.ends_with(".jsonl")
 }
 
-/// Newest recent rollout that started at or after `min_start_ms`.
+/// True for a `sessions/YYYY/MM/DD` folder whose whole day is older than a
+/// week before `now_ms`. Folders that do not parse as dates are never pruned.
+fn is_old_day_dir(e: &walkdir::DirEntry, now_ms: i64) -> bool {
+    if e.depth() != 3 || !e.file_type().is_dir() {
+        return false;
+    }
+    let parts: Vec<&str> = e
+        .path()
+        .components()
+        .rev()
+        .take(3)
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let [d, m, y] = parts.as_slice() else {
+        return false;
+    };
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(y, 4) && digits(m, 2) && digits(d, 2)) {
+        return false;
+    }
+    parse_iso8601_secs(&format!("{y}-{m}-{d}T23:59:59Z"))
+        .is_some_and(|end| end * 1000 < now_ms - WEEK_MS)
+}
+
+/// Earliest recent rollout that started at or after `min_start_ms`: the one
+/// created when the process launched, so concurrent processes get their own.
 fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
     WalkDir::new(ctx.codex_home.join("sessions"))
         .into_iter()
+        .filter_entry(|e| !is_old_day_dir(e, ctx.now_ms))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && is_rollout(e.path()))
         .filter_map(|e| {
@@ -91,10 +117,11 @@ fn find_rollout(ctx: &AgentContext, min_start_ms: i64) -> Option<Rollout> {
                 path: e.path().to_path_buf(),
             })
         })
-        .max_by_key(|r| r.started_ms)
+        .min_by_key(|r| r.started_ms)
 }
 
 /// True for context Codex injects as a user message, not typed by the user.
+/// A real prompt that starts with `<` is skipped too.
 fn is_injected(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<') || t.starts_with("# AGENTS.md")
@@ -208,9 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_picks_newest_rollout_after_process_start() {
+    fn codex_picks_newest_rollout_after_process_start_per_process() {
         let h = tmp("newest");
-        // Process started 1000 s ago: 13:27:40Z.
+        // Process B started 700 s ago (13:32:40Z); process A (below) 200 s ago.
         let long = "z".repeat(100);
         rollout(
             &h,
@@ -237,7 +264,7 @@ mod tests {
             &user_line(&long),
             0,
         );
-        let info = CodexAgent.enrich(&proc(1000), &ctx(&h));
+        let info = CodexAgent.enrich(&proc(200), &ctx(&h));
         assert_eq!(info.tool, "codex");
         assert_eq!(info.pid, 5);
         assert_eq!(info.tty.as_deref(), Some("ttys3"));
@@ -249,9 +276,9 @@ mod tests {
             Some("codex resume id-newest")
         );
         assert_eq!(info.updated_at, Some(NOW_MS));
-        // Title taken from the first user message of a plain rollout.
-        fs::remove_file(p).unwrap();
-        let info = CodexAgent.enrich(&proc(1000), &ctx(&h));
+        // The older process maps to its own, earlier rollout.
+        assert!(p.exists());
+        let info = CodexAgent.enrich(&proc(700), &ctx(&h));
         assert_eq!(info.session_id.as_deref(), Some("id-new"));
         assert_eq!(info.title.as_deref(), Some("second"));
     }
@@ -303,6 +330,55 @@ mod tests {
         let info = CodexAgent.enrich(&proc(100), &ctx(&h));
         assert_eq!(info.session_id.as_deref(), Some("id-1"));
         assert_eq!(info.title, None);
+    }
+
+    #[test]
+    fn codex_prunes_old_dated_folders_without_mtime() {
+        let h = tmp("prune");
+        let mk = |dir: &str, id: &str| {
+            let d = h.join("sessions").join(dir);
+            fs::create_dir_all(&d).unwrap();
+            // Fresh mtime, recent start: only the folder date can exclude it.
+            fs::write(
+                d.join("rollout-x.jsonl"),
+                format!("{{\"timestamp\":\"2026-07-04T13:44:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"),
+            )
+            .unwrap();
+        };
+        mk("2026/06/01", "id-old-dir");
+        let info = CodexAgent.enrich(&proc(100), &ctx(&h));
+        assert_eq!(info.session_id, None);
+        // Recent day, and folders that are not dates, are still walked.
+        mk("2026/06/28", "id-recent-dir");
+        assert_eq!(
+            CodexAgent
+                .enrich(&proc(100), &ctx(&h))
+                .session_id
+                .as_deref(),
+            Some("id-recent-dir")
+        );
+        let h2 = tmp("prune-nodate");
+        let d = h2.join("sessions/a/b/c");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("rollout-x.jsonl"),
+            "{\"timestamp\":\"2026-07-04T13:44:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"id-nd\"}}\n",
+        )
+        .unwrap();
+        let d = h2.join("sessions/2026/13/45");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("rollout-y.jsonl"),
+            "{\"timestamp\":\"2026-07-04T13:44:30Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"id-bad-date\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            CodexAgent
+                .enrich(&proc(100), &ctx(&h2))
+                .session_id
+                .as_deref(),
+            Some("id-nd")
+        );
     }
 
     #[test]
