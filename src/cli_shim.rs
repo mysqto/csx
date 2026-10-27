@@ -120,6 +120,7 @@ impl TabsRunner for RealTabs {
             db.config_dirs("claude-code").unwrap_or_default(),
             std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
             std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+            std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from),
             now_ms,
         );
         let backends = Self::backends(kitty_socket);

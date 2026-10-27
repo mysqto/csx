@@ -64,6 +64,8 @@ function __csx_pick_resume --argument-names tool id
             command claude --resume $id
         case codex
             command codex resume $id
+        case devin
+            command devin -r $id
         case '*'
             echo "csx-pick: don't know how to resume tool '$tool' (session $id)" >&2
             return 2

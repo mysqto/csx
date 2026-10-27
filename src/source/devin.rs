@@ -328,7 +328,7 @@ fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::ffi::OsString;
 

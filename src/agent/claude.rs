@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{base_info, is_uuid, Agent, AgentContext};
+use super::{base_info, is_uuid, shell_quote, Agent, AgentContext};
 use crate::tabs::process::Process;
 use crate::tabs::{AgentInfo, AgentStatus};
 
@@ -34,11 +34,6 @@ fn slug(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
-}
-
-/// Quote `s` for a POSIX shell inside single quotes.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Read the last [`TAIL_BYTES`] of a file as text; a cut first line is dropped.
@@ -152,6 +147,7 @@ mod tests {
             home: PathBuf::from("/nonexistent"),
             claude_dirs: dirs,
             codex_home: PathBuf::from("/nonexistent"),
+            devin_home: PathBuf::from("/nonexistent"),
             now_ms: 0,
         }
     }

@@ -78,6 +78,7 @@ mod tests {
             home: PathBuf::new(),
             claude_dirs: vec![],
             codex_home: PathBuf::new(),
+            devin_home: PathBuf::new(),
             now_ms: 0,
         };
         let info = GENERIC_TOOLS[1].enrich(&proc("opencode"), &ctx);

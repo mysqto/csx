@@ -252,6 +252,7 @@ mod tests {
             home: PathBuf::from("/nonexistent"),
             claude_dirs: vec![],
             codex_home: home.to_path_buf(),
+            devin_home: PathBuf::from("/nonexistent"),
             now_ms: NOW_MS,
         }
     }

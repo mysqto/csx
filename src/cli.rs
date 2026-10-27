@@ -340,13 +340,16 @@ const NO_HOME: &str = "/nonexistent";
 /// Build the agent context from explicit environment values. Empty values count
 /// as unset. Claude dirs are `~/.claude`, then the dirs the index knows, then
 /// `CLAUDE_CONFIG_DIR`, without duplicates and in that order. The Codex home is
-/// `CODEX_HOME`, else `~/.codex`. With no home, nothing is derived from it:
-/// `~/.claude` is left out and the Codex home falls back to [`NO_HOME`].
+/// `CODEX_HOME`, else `~/.codex`. The Devin home is `$XDG_DATA_HOME/devin/cli`,
+/// else `~/.local/share/devin/cli`. With no home, nothing is derived from it:
+/// `~/.claude` is left out and the Codex and Devin homes fall back to
+/// [`NO_HOME`].
 pub fn tabs_context(
     home: Option<PathBuf>,
     indexed_claude_dirs: Vec<String>,
     claude_config_dir: Option<PathBuf>,
     codex_home: Option<PathBuf>,
+    xdg_data_home: Option<PathBuf>,
     now_ms: i64,
 ) -> crate::agent::AgentContext {
     let home = home.filter(|h| !h.as_os_str().is_empty());
@@ -363,10 +366,18 @@ pub fn tabs_context(
         .filter(|c| !c.as_os_str().is_empty())
         .or_else(|| home.as_ref().map(|h| h.join(".codex")))
         .unwrap_or_else(|| PathBuf::from(NO_HOME));
+    let devin_home = match xdg_data_home.filter(|d| !d.as_os_str().is_empty()) {
+        Some(xdg) => xdg.join("devin").join("cli"),
+        None => home.as_ref().map_or_else(
+            || PathBuf::from(NO_HOME),
+            |h| h.join(".local/share/devin/cli"),
+        ),
+    };
     crate::agent::AgentContext {
         home: home.unwrap_or_else(|| PathBuf::from(NO_HOME)),
         claude_dirs,
         codex_home,
+        devin_home,
         now_ms,
     }
 }
@@ -2028,6 +2039,7 @@ tabs_hotkey: None, agents_hotkey: None } })"
             vec!["/idx/.claude".into(), "/h/.claude".into(), "".into()],
             Some(PathBuf::from("/env/claude")),
             None,
+            None,
             42,
         );
         // Duplicates and empty values are dropped; order is kept.
@@ -2040,29 +2052,55 @@ tabs_hotkey: None, agents_hotkey: None } })"
             ]
         );
         assert_eq!(ctx.codex_home, PathBuf::from("/h/.codex"));
+        assert_eq!(ctx.devin_home, PathBuf::from("/h/.local/share/devin/cli"));
         assert_eq!((ctx.home, ctx.now_ms), (PathBuf::from("/h"), 42));
 
-        let ctx = tabs_context(home.clone(), vec![], None, Some("/c".into()), 0);
+        let ctx = tabs_context(
+            home.clone(),
+            vec![],
+            None,
+            Some("/c".into()),
+            Some("/xdg".into()),
+            0,
+        );
         assert_eq!(ctx.claude_dirs, [PathBuf::from("/h/.claude")]);
         assert_eq!(ctx.codex_home, PathBuf::from("/c"));
+        assert_eq!(ctx.devin_home, PathBuf::from("/xdg/devin/cli"));
 
         // Empty env values are ignored.
-        let ctx = tabs_context(home, vec![], Some("".into()), Some("".into()), 0);
+        let ctx = tabs_context(
+            home,
+            vec![],
+            Some("".into()),
+            Some("".into()),
+            Some("".into()),
+            0,
+        );
         assert_eq!(ctx.claude_dirs, [PathBuf::from("/h/.claude")]);
         assert_eq!(ctx.codex_home, PathBuf::from("/h/.codex"));
+        assert_eq!(ctx.devin_home, PathBuf::from("/h/.local/share/devin/cli"));
     }
 
     #[test]
     fn tabs_context_without_home_builds_no_relative_paths() {
         for home in [None, Some(PathBuf::new())] {
-            let ctx = tabs_context(home, vec![], Some("/env/claude".into()), None, 1);
+            let ctx = tabs_context(home, vec![], Some("/env/claude".into()), None, None, 1);
             assert_eq!(ctx.claude_dirs, [PathBuf::from("/env/claude")]);
             assert_eq!(ctx.codex_home, PathBuf::from("/nonexistent"));
+            assert_eq!(ctx.devin_home, PathBuf::from("/nonexistent"));
             assert_eq!(ctx.home, PathBuf::from("/nonexistent"));
             assert!(ctx.codex_home.is_absolute() && ctx.home.is_absolute());
         }
-        let ctx = tabs_context(None, vec![], None, Some("/c".into()), 1);
+        let ctx = tabs_context(
+            None,
+            vec![],
+            None,
+            Some("/c".into()),
+            Some("/xdg".into()),
+            1,
+        );
         assert!(ctx.claude_dirs.is_empty());
         assert_eq!(ctx.codex_home, PathBuf::from("/c"));
+        assert_eq!(ctx.devin_home, PathBuf::from("/xdg/devin/cli"));
     }
 }

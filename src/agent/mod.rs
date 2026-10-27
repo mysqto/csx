@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod devin;
 pub mod generic;
 
 use std::path::PathBuf;
@@ -20,6 +21,11 @@ pub(crate) fn is_uuid(s: &str) -> bool {
             .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// Quote `s` for a POSIX shell inside single quotes.
+pub(crate) fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Where agents look for session data, and the current time.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -29,6 +35,8 @@ pub struct AgentContext {
     pub claude_dirs: Vec<PathBuf>,
     /// Codex home directory.
     pub codex_home: PathBuf,
+    /// Devin CLI data root (`~/.local/share/devin/cli` by default).
+    pub devin_home: PathBuf,
     /// Current time in unix milliseconds.
     pub now_ms: i64,
 }
@@ -53,10 +61,13 @@ pub(crate) fn base_info(tool: &str, p: &Process) -> AgentInfo {
     }
 }
 
-/// All known agents: Claude Code, Codex, then the generic tools.
+/// All known agents: Claude Code, Codex, Devin, then the generic tools.
 pub fn registry() -> Vec<Box<dyn Agent>> {
-    let mut v: Vec<Box<dyn Agent>> =
-        vec![Box::new(claude::ClaudeAgent), Box::new(codex::CodexAgent)];
+    let mut v: Vec<Box<dyn Agent>> = vec![
+        Box::new(claude::ClaudeAgent),
+        Box::new(codex::CodexAgent),
+        Box::new(devin::DevinAgent),
+    ];
     for t in generic::GENERIC_TOOLS {
         v.push(Box::new(*t));
     }
@@ -105,6 +116,7 @@ mod tests {
             home: PathBuf::from("/nonexistent"),
             claude_dirs: vec![PathBuf::from("/nonexistent/claude")],
             codex_home: PathBuf::from("/nonexistent/codex"),
+            devin_home: PathBuf::from("/nonexistent/devin"),
             now_ms: 0,
         }
     }
@@ -125,8 +137,8 @@ mod tests {
     fn registry_order_and_unique_ids() {
         let r = registry();
         let ids: Vec<&str> = r.iter().map(|a| a.tool()).collect();
-        assert_eq!(&ids[..2], &["claude-code", "codex"]);
-        assert_eq!(ids.len(), 2 + generic::GENERIC_TOOLS.len());
+        assert_eq!(&ids[..3], &["claude-code", "codex", "devin"]);
+        assert_eq!(ids.len(), 3 + generic::GENERIC_TOOLS.len());
         let mut sorted = ids.clone();
         sorted.sort();
         sorted.dedup();

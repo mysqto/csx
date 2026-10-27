@@ -244,6 +244,7 @@ pub(crate) fn ctx() -> AgentContext {
         home: PathBuf::from("/nonexistent"),
         claude_dirs: vec![],
         codex_home: PathBuf::from("/nonexistent/codex"),
+        devin_home: PathBuf::from("/nonexistent/devin"),
         now_ms: 0,
     }
 }
