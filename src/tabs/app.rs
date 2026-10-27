@@ -36,6 +36,9 @@ pub fn backends(kitty_socket: Option<String>) -> Vec<Box<dyn TerminalBackend>> {
     ]
 }
 
+/// Ids of the terminal backends, whose refs start with `<id>:`.
+const TERMINAL_IDS: &[&str] = &["ghostty", "iterm2", "terminal", "kitty", "wezterm"];
+
 /// True when the terminal filter keeps `id`.
 fn wants(opts: &ListOptions, id: &str) -> bool {
     opts.terminals.is_empty() || opts.terminals.iter().any(|t| t == id)
@@ -194,11 +197,13 @@ pub fn focus(ports: &Ports, backends: &[Box<dyn TerminalBackend>], tab_ref: &str
     match prefix {
         "tty" => focus_tty(ports, backends, rest),
         "tmux" => focus_tmux(ports, backends, rest),
-        _ => backends
-            .iter()
-            .find(|b| b.id() == prefix)
-            .ok_or_else(unknown)?
-            .focus(ports, tab_ref),
+        _ => match backends.iter().find(|b| b.id() == prefix) {
+            Some(b) => b.focus(ports, tab_ref),
+            None if TERMINAL_IDS.contains(&prefix) => {
+                Err(Error::other(format!("{prefix} is not enabled")))
+            }
+            None => Err(unknown()),
+        },
     }
 }
 
@@ -695,10 +700,66 @@ mod tests {
         let l = log();
         let os = FakeOs::new(&l);
         let b = vec![FakeBackend::new("iterm2", &l).boxed()];
-        for r in ["foo:1", "noprefix", "", "kitty:1"] {
+        for r in ["foo:1", "noprefix", ""] {
             let e = focus(&os.ports(), &b, r).unwrap_err();
             assert!(e.to_string().starts_with("unknown tab ref"), "{r}: {e}");
         }
         assert!(l.borrow().is_empty());
+    }
+
+    #[test]
+    fn focus_known_terminal_not_in_list_is_not_enabled() {
+        let l = log();
+        let os = FakeOs::new(&l);
+        let b = vec![FakeBackend::new("iterm2", &l).boxed()];
+        for id in ["ghostty", "terminal", "kitty", "wezterm"] {
+            let e = focus(&os.ports(), &b, &format!("{id}:1")).unwrap_err();
+            assert_eq!(e.to_string(), format!("{id} is not enabled"));
+        }
+        assert!(l.borrow().is_empty());
+    }
+
+    #[test]
+    fn ghostty_hosted_tmux_pane_is_focusable() {
+        // Ghostty reports no tty, so the pane is not nested under a tab, but
+        // its session has a client, so the row keeps a tmux ref and focus
+        // reaches Ghostty's focus_tty on the client tty.
+        let l = log();
+        let os = FakeOs::new(&l)
+            .answer("ps -axo", &ps_line(10, "ttys101"))
+            .answer(
+                "tmux list-panes",
+                "%4	g	3	1	/dev/ttys101	/w	p
+",
+            )
+            .answer(
+                "tmux list-clients",
+                "/dev/ttys050	g
+",
+            )
+            .answer("tmux switch-client", "")
+            .answer("tmux select-window", "")
+            .answer("tmux select-pane", "");
+        let mk = || {
+            vec![
+                FakeBackend::new("ghostty", &l)
+                    .tabs(vec![tab("ghostty", "ghostty:1", "✳ x", 1, 1)])
+                    .shows("ttys050")
+                    .boxed(),
+                FakeBackend::new("iterm2", &l).boxed(),
+            ]
+        };
+        let r = run_list(&os, mk(), vec![agent(10, None, Some(1))], &opts());
+        assert_eq!(ids(&r.rows), ["tmux:%4", "ghostty:1"]);
+        assert_eq!((r.rows[0].window, r.rows[0].index), (3, 1));
+        assert_eq!(r.rows[0].agent.as_ref().unwrap().pid, 10);
+
+        let os = os.answer("ps -axo", &ps_line(9, "ttys050"));
+        l.borrow_mut().clear();
+        focus(&os.ports(), &mk(), "tmux:%4").unwrap();
+        assert_eq!(
+            logged(&l, "focus_tty"),
+            ["focus_tty:iterm2:ttys050", "focus_tty:ghostty:ttys050"]
+        );
     }
 }

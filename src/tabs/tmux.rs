@@ -92,8 +92,11 @@ fn pane_tab(p: &TmuxPane, ref_: Option<String>, window: u32, index: u32) -> Tab 
 
 /// Panes as tabs: each directly after the outer tab whose tty is a client tty
 /// of the pane's session (nested panes take that outer tab's window and index).
-/// Panes of a session with no matching outer tab get no ref and keep the
-/// window and pane index from tmux; they are appended at the end.
+/// Panes of a session with no matching outer tab keep the window and pane
+/// index from tmux and are appended at the end. They still get a ref when
+/// their session has a client, because that client may run in a tab whose tty
+/// no backend reports (Ghostty), which `tty:` focus can still find. Panes of a
+/// session with no client get no ref.
 pub fn nest(outer: Vec<Tab>, panes: &[TmuxPane], clients: &[TmuxClient]) -> Vec<Tab> {
     let mut placed = vec![false; panes.len()];
     let mut out = Vec::with_capacity(outer.len() + panes.len());
@@ -119,7 +122,9 @@ pub fn nest(outer: Vec<Tab>, panes: &[TmuxPane], clients: &[TmuxClient]) -> Vec<
         out.extend(nested);
     }
     for (p, _) in panes.iter().zip(&placed).filter(|(_, done)| !**done) {
-        out.push(pane_tab(p, None, p.window, p.pane));
+        let attached = clients.iter().any(|c| c.session == p.session);
+        let ref_ = attached.then(|| format!("tmux:{}", p.id));
+        out.push(pane_tab(p, ref_, p.window, p.pane));
     }
     out
 }
@@ -157,19 +162,6 @@ pub fn focus_client(cmd: &dyn CommandRunner, pane_id: &str, client_tty: &str) ->
     cmd.run("tmux", &["select-window", "-t", pane_id])?;
     cmd.run("tmux", &["select-pane", "-t", pane_id])?;
     Ok(())
-}
-
-/// Switch the first client of the pane's session to the pane. Returns the
-/// client tty so the caller can focus the outer tab that hosts it.
-pub fn focus(
-    cmd: &dyn CommandRunner,
-    pane_id: &str,
-    clients: &[TmuxClient],
-    panes: &[TmuxPane],
-) -> Result<String> {
-    let tty = client_ttys(pane_id, clients, panes)?.remove(0);
-    focus_client(cmd, pane_id, &tty)?;
-    Ok(tty)
 }
 
 #[cfg(test)]
@@ -319,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn nest_unplaced_pane_with_a_client_keeps_its_ref() {
+        // The client runs in a tab whose tty no backend reports (Ghostty), so
+        // the pane is not nested but can still be focused through its client.
+        let panes = vec![pane("%5", "g", 2, 1)];
+        let rows = nest(
+            vec![outer("ttys001", 1, 1)],
+            &panes,
+            &[client("ttys001", "x"), client("ttys008", "g")],
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].ref_.as_deref(), Some("tmux:%5"));
+        assert_eq!((rows[1].window, rows[1].index), (2, 1));
+    }
+
+    #[test]
     fn nest_pane_without_client_has_no_ref() {
         let panes = vec![pane("%7", "lonely", 3, 2)];
         let rows = nest(
@@ -330,34 +337,6 @@ mod tests {
         assert_eq!(rows[1].terminal, "tmux");
         assert_eq!(rows[1].ref_, None);
         assert_eq!((rows[1].window, rows[1].index), (3, 2));
-    }
-
-    #[test]
-    fn focus_switches_client_and_returns_client_tty() {
-        let f = Fake::new(None, None);
-        let panes = vec![pane("%3", "main", 1, 0)];
-        let clients = vec![client("ttys001", "other"), client("ttys004", "main")];
-        assert_eq!(focus(&f, "%3", &clients, &panes).unwrap(), "ttys004");
-        let calls = f.calls.borrow();
-        assert_eq!(
-            *calls,
-            vec![
-                vec!["switch-client", "-c", "/dev/ttys004", "-t", "%3"],
-                vec!["select-window", "-t", "%3"],
-                vec!["select-pane", "-t", "%3"],
-            ]
-        );
-    }
-
-    #[test]
-    fn focus_without_client_errors() {
-        let f = Fake::new(None, None);
-        let panes = vec![pane("%3", "main", 1, 0)];
-        let e = focus(&f, "%3", &[client("ttys1", "other")], &panes).unwrap_err();
-        assert!(e.to_string().contains("no attached client"));
-        let e = focus(&f, "%9", &[], &panes).unwrap_err();
-        assert!(e.to_string().contains("%9 not found"));
-        assert!(f.calls.borrow().is_empty());
     }
 
     #[test]
@@ -390,19 +369,10 @@ mod tests {
                 vec!["select-pane", "-t", "%3"],
             ]
         );
-        let mut f = Fake::new(None, None);
-        f.fail_on = Some("switch-client");
-        assert!(focus_client(&f, "%3", "ttys002").is_err());
-    }
-
-    #[test]
-    fn focus_propagates_command_failure() {
-        let panes = vec![pane("%3", "main", 1, 0)];
-        let clients = vec![client("ttys4", "main")];
         for step in ["switch-client", "select-window", "select-pane"] {
             let mut f = Fake::new(None, None);
             f.fail_on = Some(step);
-            assert!(focus(&f, "%3", &clients, &panes).is_err(), "{step}");
+            assert!(focus_client(&f, "%3", "ttys002").is_err(), "{step}");
         }
     }
 }

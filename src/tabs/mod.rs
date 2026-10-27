@@ -186,11 +186,14 @@ pub fn write_tty(ports: &Ports, tty: &str, bytes: &[u8]) -> Result<()> {
     ports.tty.write(tty, bytes)
 }
 
-/// Sort rows: agent rows first, newest `updated_at` first (`None` last); then
-/// tabs by (terminal, window, index).
+/// Sort rows: agent rows first, newest `updated_at` first (`None` last), ties
+/// by (terminal, window, index, agent pid); then tabs by (terminal, window,
+/// index).
 pub fn sort_rows(rows: &mut [Row]) {
     rows.sort_by(|a, b| match (&a.agent, &b.agent) {
-        (Some(x), Some(y)) => y.updated_at.cmp(&x.updated_at),
+        (Some(x), Some(y)) => y.updated_at.cmp(&x.updated_at).then_with(|| {
+            (&a.terminal, a.window, a.index, x.pid).cmp(&(&b.terminal, b.window, b.index, y.pid))
+        }),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => (&a.terminal, a.window, a.index).cmp(&(&b.terminal, b.window, b.index)),
@@ -272,6 +275,31 @@ mod tests {
             })
             .collect();
         assert_eq!(order, vec!["new", "old", "none", "g11", "g12", "g21", "t1"]);
+    }
+
+    #[test]
+    fn sort_rows_breaks_agent_ties_by_position_then_pid() {
+        let at = |terminal: &str, window: u32, index: u32, pid: u32, updated: Option<i64>| {
+            let mut r = tab(terminal, window, index, "");
+            r.agent = Some(AgentInfo {
+                pid,
+                updated_at: updated,
+                ..AgentInfo::default()
+            });
+            r
+        };
+        let mut rows = vec![
+            at("tmux", 1, 1, 1, Some(5)),
+            at("", 0, 0, 9, None),
+            at("ghostty", 1, 2, 2, Some(5)),
+            at("", 0, 0, 3, None),
+            at("ghostty", 1, 1, 7, Some(5)),
+            at("ghostty", 1, 1, 4, Some(5)),
+            at("iterm2", 1, 1, 8, Some(6)),
+        ];
+        sort_rows(&mut rows);
+        let pids: Vec<u32> = rows.iter().map(|r| r.agent.as_ref().unwrap().pid).collect();
+        assert_eq!(pids, vec![8, 4, 7, 2, 1, 3, 9]);
     }
 
     #[test]
