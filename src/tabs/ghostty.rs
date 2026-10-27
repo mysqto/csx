@@ -37,8 +37,13 @@ fn lit(s: &str) -> String {
 }
 
 const LIST_JXA: &str = r#"(() => {
-  const g = Application("Ghostty");
-  if (!g.running()) return "null";
+  let g;
+  try {
+    g = Application("Ghostty");
+    if (!g.running()) return "null";
+  } catch (e) {
+    return "null";
+  }
   const out = [];
   g.windows().forEach((w, wi) => {
     w.tabs().forEach((t, ti) => {
@@ -101,7 +106,7 @@ impl TerminalBackend for Ghostty {
                     terminal: "ghostty".into(),
                     ref_: Some(format!("ghostty:{}", e.id)),
                     title: e.name,
-                    cwd: e.cwd,
+                    cwd: e.cwd.filter(|c| !c.is_empty()),
                     window: e.w,
                     index: e.t,
                     ..Tab::default()
@@ -111,7 +116,9 @@ impl TerminalBackend for Ghostty {
     }
 
     fn focus(&self, ports: &Ports, tab_ref: &str) -> Result<()> {
-        let id = tab_ref.strip_prefix("ghostty:").unwrap_or(tab_ref);
+        let id = tab_ref
+            .strip_prefix("ghostty:")
+            .ok_or_else(|| Error::other(format!("not a Ghostty ref: {tab_ref}")))?;
         focus_id(ports, id).map(|_| ())
     }
 
@@ -221,18 +228,21 @@ mod tests {
     #[test]
     fn list_parses_windows_tabs_terminals() {
         let r = Rig::new(&[
-            r#"[{"w":1,"t":1,"id":"A","name":"one","cwd":"/a"},{"w":2,"t":3,"id":"B","name":"two","cwd":null}]"#,
+            r#"[{"w":1,"t":1,"id":"A","name":"one","cwd":"/a"},{"w":2,"t":3,"id":"B","name":"two","cwd":null},{"w":2,"t":4,"id":"C","name":"three","cwd":""}]"#,
         ]);
         let tabs = Ghostty.list(&r.ports()).unwrap().unwrap();
         assert_eq!(Ghostty.id(), "ghostty");
-        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[2].cwd, None);
         assert_eq!(tabs[0].ref_.as_deref(), Some("ghostty:A"));
         assert_eq!(tabs[0].terminal, "ghostty");
         assert_eq!(tabs[0].cwd.as_deref(), Some("/a"));
         assert_eq!((tabs[1].window, tabs[1].index), (2, 3));
         assert_eq!(tabs[1].cwd, None);
         assert_eq!(tabs[1].tty, None);
-        assert!(r.osa.scripts.borrow()[0].contains("running()"));
+        let script = r.osa.scripts.borrow()[0].clone();
+        assert!(script.contains("running()"));
+        assert!(script.contains("try {") && script.contains("catch (e)"));
         assert!(r.ports().cmd.run("x", &[]).unwrap().is_empty());
     }
 
@@ -269,10 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn focus_ref_without_prefix_uses_whole_ref() {
-        let r = Rig::new(&[r#""n""#]);
-        Ghostty.focus(&r.ports(), "RAW").unwrap();
-        assert!(r.osa.scripts.borrow()[0].contains(r#""RAW""#));
+    fn focus_ref_rejects_foreign_ref() {
+        let r = Rig::new(&[]);
+        let e = Ghostty.focus(&r.ports(), "tmux:%1").unwrap_err();
+        assert!(e.to_string().contains("not a Ghostty ref"));
+        assert!(r.osa.scripts.borrow().is_empty());
     }
 
     #[test]
