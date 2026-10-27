@@ -799,6 +799,21 @@ impl Db {
         Ok(out)
     }
 
+    /// Distinct, non-null config directories of the sources for `tool`, sorted.
+    pub fn config_dirs(&self, tool: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT config_dir FROM sources
+             WHERE tool = ?1 AND config_dir IS NOT NULL
+             ORDER BY config_dir",
+        )?;
+        let rows = stmt.query_map([tool], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// The active account per tool: for each tool, the source owning the session
     /// with the most recent `last_ts`. Powers the `current` command.
     pub fn current_accounts(&self) -> Result<Vec<CurrentAccount>> {
@@ -1848,5 +1863,31 @@ mod tests {
             )
             .unwrap();
         assert!(db.list_sessions(&Scope::default(), 10).is_err());
+    }
+
+    #[test]
+    fn config_dirs_distinct_sorted_by_tool() {
+        let db = Db::open(":memory:").unwrap();
+        for (tool, dir) in [
+            ("claude-code", Some("/b/.claude")),
+            ("claude-code", Some("/a/.claude")),
+            ("claude-code", Some("/b/.claude")),
+            ("claude-code", None),
+            ("codex", Some("/c/.codex")),
+        ] {
+            db.upsert_source(&SourceRow {
+                tool: Some(tool.into()),
+                config_dir: dir.map(str::to_string),
+                profile: dir.map(|d| format!("p{d}")),
+                ..SourceRow::default()
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            db.config_dirs("claude-code").unwrap(),
+            vec!["/a/.claude", "/b/.claude"]
+        );
+        assert_eq!(db.config_dirs("codex").unwrap(), vec!["/c/.codex"]);
+        assert!(db.config_dirs("none").unwrap().is_empty());
     }
 }

@@ -8,6 +8,8 @@
 
 #![warn(missing_docs)]
 
+pub mod agent;
+pub mod alfred;
 pub mod analyze;
 pub mod chat_shim;
 pub mod cli;
@@ -27,6 +29,7 @@ pub mod output;
 pub mod rag;
 pub mod repo;
 pub mod source;
+pub mod tabs;
 pub mod transport_shim;
 pub mod watch_shim;
 

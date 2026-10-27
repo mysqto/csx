@@ -1,0 +1,1 @@
+//! Claude Code agent detection.
