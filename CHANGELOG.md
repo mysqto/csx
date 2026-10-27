@@ -4,19 +4,6 @@ All notable changes to csx are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **`csx alfred install --tabs-hotkey <SPEC> --agents-hotkey <SPEC>`** sets the
-  hotkeys of the "Terminal tabs" and "AI sessions" triggers, for example
-  `--agents-hotkey alt+a`. A hotkey needs at least one modifier.
-
-### Fixed
-
-- `csx alfred install` no longer removes a hotkey you set in Alfred. It keeps
-  the hotkey of each trigger when it writes the workflow again.
-
 ## [0.2.0] - 2026-10-27
 
 ### Added
@@ -30,6 +17,10 @@ All notable changes to csx are documented here. The format follows
 - **`csx tabs focus <ref>`** brings a tab to the front.
 - **`csx alfred install`** installs the Alfred workflow from the binary, keeps
   the keyword of the older Claude Tabs workflow and removes that workflow.
+- **`--tabs-hotkey <SPEC>` and `--agents-hotkey <SPEC>`** on `csx alfred install`
+  set the hotkeys of the "Terminal tabs" and "AI sessions" triggers, for
+  example `--agents-hotkey alt+a`. A hotkey needs at least one modifier.
+  Reinstalling keeps a hotkey you set in Alfred.
 - kitty sockets: `--kitty-socket` (also on `focus`), then `KITTY_LISTEN_ON`, then
   `<TMPDIR>/kitty-<pid>` of each running kitty.
 - Agents without a tty (such as `codex app-server`) are not listed. A resumed
