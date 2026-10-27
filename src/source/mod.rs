@@ -11,11 +11,13 @@ use crate::model::{Account, MessageRecord, SessionMeta, Tool};
 
 pub mod claude;
 pub mod codex;
+pub mod devin;
 pub mod fileid;
 pub mod jsonl;
 
 pub use claude::ClaudeSource;
 pub use codex::CodexSource;
+pub use devin::DevinSource;
 
 /// A discovered transcript file on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]

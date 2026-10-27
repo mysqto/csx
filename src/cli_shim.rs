@@ -19,7 +19,7 @@ use crate::daemon::{serve_loop, watch_loop, Debouncer};
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::git_shim::{GitRunner, ProcessGit};
-use crate::source::{ClaudeSource, CodexSource, SessionSource};
+use crate::source::{ClaudeSource, CodexSource, DevinSource, SessionSource};
 use crate::transport_shim::UnixSocketListener;
 use crate::watch_shim::NotifyWatcher;
 use crate::SystemClock;
@@ -179,11 +179,13 @@ impl TabsRunner for RealTabs {
     }
 }
 
-/// Build the default set of sources from the environment (Claude Code + Codex).
+/// Build the default set of sources from the environment (Claude Code, Codex
+/// and Devin).
 fn default_sources() -> Vec<Box<dyn SessionSource>> {
     vec![
         Box::new(ClaudeSource::from_env()),
         Box::new(CodexSource::from_env()),
+        Box::new(DevinSource::from_env()),
     ]
 }
 

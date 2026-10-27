@@ -1,6 +1,6 @@
 //! csx — fast local full-text and hybrid search over AI-coding session
-//! transcripts (Claude Code and Codex CLI), scoped by account, repo, tool,
-//! branch, and time.
+//! transcripts (Claude Code, Codex CLI and Devin CLI), scoped by account,
+//! repo, tool, branch, and time.
 //!
 //! This crate is organized around ports-and-adapters: all real OS/network
 //! side effects live behind traits with `*_shim.rs` implementations, while all
@@ -72,7 +72,7 @@ pub use rag::{
     ChatClient, Passage, RagEngine, SYSTEM_PROMPT,
 };
 pub use repo::{normalize_remote, resolve_repo_id};
-pub use source::{ClaudeSource, CodexSource, ParsedDelta, SessionFile, SessionSource};
+pub use source::{ClaudeSource, CodexSource, DevinSource, ParsedDelta, SessionFile, SessionSource};
 pub use transport_shim::{Conn, Listener, UnixConn, UnixSocketListener};
 pub use watch_shim::{FileWatcher, NotifyWatcher, WatchEvent};
 

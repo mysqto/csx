@@ -54,7 +54,7 @@ pub struct ScopeArgs {
     /// Restrict to a named profile.
     #[arg(long)]
     pub profile: Option<String>,
-    /// Restrict to a tool (`claude-code` or `codex`).
+    /// Restrict to a tool (`claude-code`, `codex` or `devin`).
     #[arg(long)]
     pub tool: Option<String>,
     /// Restrict to a repository id.

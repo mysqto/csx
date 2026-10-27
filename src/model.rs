@@ -11,6 +11,8 @@ pub enum Tool {
     ClaudeCode,
     /// Codex CLI transcripts.
     Codex,
+    /// Devin CLI transcripts.
+    Devin,
 }
 
 impl Tool {
@@ -19,6 +21,7 @@ impl Tool {
         match self {
             Tool::ClaudeCode => "claude-code",
             Tool::Codex => "codex",
+            Tool::Devin => "devin",
         }
     }
 
@@ -28,6 +31,7 @@ impl Tool {
         match s {
             "claude-code" => Ok(Tool::ClaudeCode),
             "codex" => Ok(Tool::Codex),
+            "devin" => Ok(Tool::Devin),
             other => Err(Error::Unknown(format!("tool: {other}"))),
         }
     }
@@ -135,7 +139,7 @@ mod tests {
 
     #[test]
     fn tool_roundtrip() {
-        for t in [Tool::ClaudeCode, Tool::Codex] {
+        for t in [Tool::ClaudeCode, Tool::Codex, Tool::Devin] {
             assert_eq!(Tool::from_str(t.as_str()).unwrap(), t);
         }
         assert!(Tool::from_str("nope").is_err());
