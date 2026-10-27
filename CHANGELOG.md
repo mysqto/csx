@@ -6,7 +6,16 @@ All notable changes to csx are documented here. The format follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`csx alfred install --tabs-hotkey <SPEC> --agents-hotkey <SPEC>`** sets the
+  hotkeys of the "Terminal tabs" and "AI sessions" triggers, for example
+  `--agents-hotkey alt+a`. A hotkey needs at least one modifier.
+
+### Fixed
+
+- `csx alfred install` no longer removes a hotkey you set in Alfred. It keeps
+  the hotkey of each trigger when it writes the workflow again.
 
 ## [0.2.0] - 2026-10-27
 

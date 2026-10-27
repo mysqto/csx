@@ -136,13 +136,14 @@ impl TabsRunner for RealTabs {
     fn alfred_install(
         &self,
         prefs: Option<std::path::PathBuf>,
+        hotkeys: &crate::alfred::Hotkeys,
     ) -> Result<crate::alfred::InstallReport> {
         let dir = crate::alfred::resolve_prefs(
             prefs,
             &crate::tabs::os_shim::RealCommand,
             self.home().as_deref(),
         )?;
-        crate::alfred::install(&dir)
+        crate::alfred::install(&dir, hotkeys)
     }
 
     fn home(&self) -> Option<std::path::PathBuf> {
@@ -168,6 +169,7 @@ impl TabsRunner for RealTabs {
     fn alfred_install(
         &self,
         _prefs: Option<std::path::PathBuf>,
+        _hotkeys: &crate::alfred::Hotkeys,
     ) -> Result<crate::alfred::InstallReport> {
         Err(Error::other("csx tabs is supported on macOS only"))
     }

@@ -285,11 +285,28 @@ the workflow there. Use `--prefs <path to Alfred.alfredpreferences>` to
 choose the folder yourself. If you used the older Claude Tabs workflow, csx
 keeps your keyword and removes the old workflow.
 
-Then set the hotkeys in Alfred:
+Set the hotkeys when you install:
 
-1. Open Alfred Preferences, then Workflows, then csx tabs.
-2. Click the hotkey box of "Terminal tabs" (keyword `tt`) and press a key.
-3. Do the same for "AI sessions" (keyword `ct`).
+```sh
+csx alfred install --agents-hotkey alt+a --tabs-hotkey alt+t
+```
+
+`--tabs-hotkey` sets the hotkey of "Terminal tabs" (keyword `tt`).
+`--agents-hotkey` sets the hotkey of "AI sessions" (keyword `ct`). A hotkey is
+one or more modifiers and one key, joined with `+`, for example `alt+a`,
+`cmd+shift+space` or `ctrl+alt+1`. The modifiers are `shift`, `ctrl`,
+`alt` (or `opt`), and `cmd`. The keys are the letters, the digits and `space`.
+You must give at least one modifier. csx stops with an error, and writes
+nothing, if the hotkey is not valid.
+
+You can also set a hotkey in Alfred: open Alfred Preferences, then Workflows,
+then csx tabs, click the hotkey box and press a key. Alfred keeps the hotkey
+inside the workflow, and `csx alfred install` keeps it when you install
+again. A flag replaces the kept hotkey of that trigger only.
+
+A hotkey such as `alt+a` takes the key from other apps. Option+A no longer
+types its special character in any app. Choose another hotkey if you need
+that character.
 
 In the result list, press Return to focus the tab. Press Cmd+Return to copy
 the session id (or the working directory). Press Option+Return to copy a

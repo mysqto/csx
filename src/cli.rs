@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::alfred::InstallReport;
+use crate::alfred::{Hotkey, HotkeyOutcome, Hotkeys, InstallReport};
 
 use crate::db::{Db, Scope, SearchOpts};
 use crate::error::{Error, Result};
@@ -124,6 +124,12 @@ pub enum AlfredAction {
         /// Alfred preferences folder; found automatically when omitted.
         #[arg(long)]
         prefs: Option<PathBuf>,
+        /// Hotkey for "Terminal tabs", such as `alt+t` or `cmd+shift+space`.
+        #[arg(long, value_name = "SPEC", value_parser = Hotkey::parse)]
+        tabs_hotkey: Option<Hotkey>,
+        /// Hotkey for "AI sessions", such as `alt+a`.
+        #[arg(long, value_name = "SPEC", value_parser = Hotkey::parse)]
+        agents_hotkey: Option<Hotkey>,
     },
 }
 
@@ -313,8 +319,9 @@ pub trait TabsRunner {
         -> Result<TabsReport>;
     /// Focus the tab named by `tab_ref`.
     fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()>;
-    /// Install or update the Alfred workflow; `prefs` overrides discovery.
-    fn alfred_install(&self, prefs: Option<PathBuf>) -> Result<InstallReport>;
+    /// Install or update the Alfred workflow; `prefs` overrides discovery and
+    /// `hotkeys` overrides hotkeys kept from the previous install.
+    fn alfred_install(&self, prefs: Option<PathBuf>, hotkeys: &Hotkeys) -> Result<InstallReport>;
     /// The user's home directory, when known; used to shorten paths.
     fn home(&self) -> Option<PathBuf>;
 }
@@ -391,10 +398,24 @@ pub fn handle_tabs(
 pub fn handle_alfred_install(
     tabs: &dyn TabsRunner,
     prefs: Option<PathBuf>,
+    hotkeys: &Hotkeys,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let report = tabs.alfred_install(prefs)?;
+    let report = tabs.alfred_install(prefs, hotkeys)?;
     writeln!(out, "installed the workflow in {}", report.dir.display())?;
+    for (name, outcome) in [
+        ("Terminal tabs", &report.tabs_hotkey),
+        ("AI sessions", &report.agents_hotkey),
+    ] {
+        match outcome {
+            HotkeyOutcome::Unset => {}
+            HotkeyOutcome::Set(h) => writeln!(out, "hotkey for {name}: {h}")?,
+            HotkeyOutcome::Kept(h) => writeln!(
+                out,
+                "hotkey for {name}: {h} (kept from the previous install)"
+            )?,
+        }
+    }
     if let Some(keyword) = &report.migrated_keyword {
         writeln!(out, "migrated keyword {keyword}")?;
     }
@@ -591,8 +612,19 @@ pub fn dispatch(
             handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
         }
         Some(Command::Alfred {
-            action: AlfredAction::Install { prefs },
-        }) => handle_alfred_install(tabs, prefs, out),
+            action:
+                AlfredAction::Install {
+                    prefs,
+                    tabs_hotkey,
+                    agents_hotkey,
+                },
+        }) => {
+            let hotkeys = Hotkeys {
+                tabs: tabs_hotkey,
+                agents: agents_hotkey,
+            };
+            handle_alfred_install(tabs, prefs, &hotkeys, out)
+        }
         None => {
             writeln!(out, "csx {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
@@ -1480,9 +1512,21 @@ mod tests {
         .unwrap_err();
         // The report has four lines, so failing after 0..=3 lines hits each write.
         for ok_lines in 0..4 {
-            handle_alfred_install(&tabs, None, &mut LimitWriter { ok_lines }).unwrap_err();
+            handle_alfred_install(
+                &tabs,
+                None,
+                &Hotkeys::default(),
+                &mut LimitWriter { ok_lines },
+            )
+            .unwrap_err();
         }
-        handle_alfred_install(&tabs, None, &mut LimitWriter { ok_lines: 4 }).unwrap();
+        handle_alfred_install(
+            &tabs,
+            None,
+            &Hotkeys::default(),
+            &mut LimitWriter { ok_lines: 4 },
+        )
+        .unwrap();
     }
 
     /// Tabs runner for tests that never reach the tabs code.
@@ -1494,7 +1538,7 @@ mod tests {
         fn focus(&self, _: &str, _: Option<String>) -> Result<()> {
             Err(Error::other("tabs should not be called"))
         }
-        fn alfred_install(&self, _: Option<PathBuf>) -> Result<InstallReport> {
+        fn alfred_install(&self, _: Option<PathBuf>, _: &Hotkeys) -> Result<InstallReport> {
             Err(Error::other("tabs should not be called"))
         }
         fn home(&self) -> Option<PathBuf> {
@@ -1535,8 +1579,14 @@ mod tests {
             }
             Ok(())
         }
-        fn alfred_install(&self, prefs: Option<PathBuf>) -> Result<InstallReport> {
-            self.seen.borrow_mut().push(format!("install {prefs:?}"));
+        fn alfred_install(
+            &self,
+            prefs: Option<PathBuf>,
+            hotkeys: &Hotkeys,
+        ) -> Result<InstallReport> {
+            self.seen
+                .borrow_mut()
+                .push(format!("install {prefs:?} {hotkeys:?}"));
             if self.fail {
                 return Err(Error::other("tabs boom"));
             }
@@ -1672,11 +1722,12 @@ mod tests {
         ]);
         assert_eq!(
             format!("{:?}", cli.command),
-            "Some(Alfred { action: Install { prefs: Some(\"/p/Alfred.alfredpreferences\") } })"
+            "Some(Alfred { action: Install { prefs: Some(\"/p/Alfred.alfredpreferences\"), \
+tabs_hotkey: None, agents_hotkey: None } })"
         );
         assert_eq!(
             format!("{:?}", parse(&["csx", "alfred", "install"]).command),
-            "Some(Alfred { action: Install { prefs: None } })"
+            "Some(Alfred { action: Install { prefs: None, tabs_hotkey: None, agents_hotkey: None } })"
         );
     }
 
@@ -1753,6 +1804,8 @@ mod tests {
             dir: PathBuf::from("/prefs/workflows/csx-tabs"),
             migrated_keyword: migrated.map(str::to_string),
             removed_old,
+            tabs_hotkey: HotkeyOutcome::Unset,
+            agents_hotkey: HotkeyOutcome::Unset,
         }
     }
 
@@ -1768,7 +1821,10 @@ mod tests {
         assert!(out.contains("migrated keyword ct"));
         assert!(out.contains("removed the old Claude Tabs workflow"));
         assert!(out.contains(notice));
-        assert_eq!(*tabs.seen.borrow(), ["install Some(\"/p\")"]);
+        assert_eq!(
+            *tabs.seen.borrow(),
+            ["install Some(\"/p\") Hotkeys { tabs: None, agents: None }"]
+        );
 
         let tabs = FakeTabs {
             install: Some(install_report(None, false)),
@@ -1777,7 +1833,134 @@ mod tests {
         let out = run_tabs(&["csx", "alfred", "install"], &tabs).unwrap();
         assert!(!out.contains("migrated") && !out.contains("removed"));
         assert!(out.contains(notice));
-        assert_eq!(*tabs.seen.borrow(), ["install None"]);
+        assert_eq!(
+            *tabs.seen.borrow(),
+            ["install None Hotkeys { tabs: None, agents: None }"]
+        );
+    }
+
+    fn hk(spec: &str) -> Hotkey {
+        Hotkey::parse(spec).unwrap()
+    }
+
+    #[test]
+    fn parses_alfred_install_hotkey_flags() {
+        let cli = parse(&[
+            "csx",
+            "alfred",
+            "install",
+            "--agents-hotkey",
+            "alt+a",
+            "--tabs-hotkey",
+            "cmd+shift+space",
+        ]);
+        let Some(Command::Alfred {
+            action:
+                AlfredAction::Install {
+                    prefs,
+                    tabs_hotkey,
+                    agents_hotkey,
+                },
+        }) = cli.command
+        else {
+            panic!("not alfred install");
+        };
+        assert_eq!(prefs, None);
+        assert_eq!(tabs_hotkey, Some(hk("cmd+shift+space")));
+        assert_eq!(agents_hotkey, Some(hk("alt+a")));
+    }
+
+    #[test]
+    fn bad_hotkey_flag_fails_to_parse() {
+        for bad in ["a", "alt+f13", "hyper+a", ""] {
+            assert!(
+                Cli::try_parse_from(["csx", "alfred", "install", "--tabs-hotkey", bad]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                Cli::try_parse_from(["csx", "alfred", "install", "--agents-hotkey", bad]).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_alfred_install_passes_hotkeys_and_prints_them() {
+        let mut report = install_report(None, false);
+        report.tabs_hotkey = HotkeyOutcome::Kept(hk("opt+t"));
+        report.agents_hotkey = HotkeyOutcome::Set(hk("alt+a"));
+        let tabs = FakeTabs {
+            install: Some(report),
+            ..Default::default()
+        };
+        let out = run_tabs(
+            &["csx", "alfred", "install", "--agents-hotkey", "alt+a"],
+            &tabs,
+        )
+        .unwrap();
+        let agents = format!("hotkey for AI sessions: {}\n", hk("alt+a"));
+        let kept = format!(
+            "hotkey for Terminal tabs: {} (kept from the previous install)\n",
+            hk("opt+t")
+        );
+        assert!(out.contains(&agents), "{out}");
+        assert!(out.contains(&kept), "{out}");
+        assert!(out.contains("\u{2325}A"));
+        assert_eq!(
+            *tabs.seen.borrow(),
+            [format!(
+                "install None Hotkeys {{ tabs: None, agents: Some({:?}) }}",
+                hk("alt+a")
+            )]
+        );
+    }
+
+    #[test]
+    fn handle_alfred_install_omits_unset_hotkeys() {
+        let tabs = FakeTabs {
+            install: Some(install_report(None, false)),
+            ..Default::default()
+        };
+        let out = run_tabs(&["csx", "alfred", "install"], &tabs).unwrap();
+        assert!(!out.contains("hotkey for"));
+    }
+
+    #[test]
+    fn handle_alfred_install_propagates_hotkey_line_write_errors() {
+        let mut report = install_report(None, false);
+        report.tabs_hotkey = HotkeyOutcome::Set(hk("alt+t"));
+        report.agents_hotkey = HotkeyOutcome::Kept(hk("alt+a"));
+        let tabs = FakeTabs {
+            install: Some(report),
+            ..Default::default()
+        };
+        // Lines: installed, tabs hotkey, agents hotkey, notice.
+        for ok_lines in 0..4 {
+            handle_alfred_install(
+                &tabs,
+                None,
+                &Hotkeys::default(),
+                &mut LimitWriter { ok_lines },
+            )
+            .unwrap_err();
+        }
+        handle_alfred_install(
+            &tabs,
+            None,
+            &Hotkeys::default(),
+            &mut LimitWriter { ok_lines: 4 },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_alfred_install_propagates_runner_error() {
+        let tabs = FakeTabs {
+            fail: true,
+            ..Default::default()
+        };
+        let args = ["csx", "alfred", "install", "--tabs-hotkey", "alt+t"];
+        assert!(run_tabs(&args, &tabs).is_err());
     }
 
     #[test]
@@ -1801,7 +1984,7 @@ mod tests {
         let db = fixture_db();
         assert!(NoTabs.list(&db, &ListOptions::default(), None).is_err());
         assert!(NoTabs.focus("x", None).is_err());
-        assert!(NoTabs.alfred_install(None).is_err());
+        assert!(NoTabs.alfred_install(None, &Hotkeys::default()).is_err());
         assert_eq!(NoTabs.home(), None);
     }
 
