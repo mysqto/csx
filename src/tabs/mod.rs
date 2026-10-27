@@ -9,6 +9,8 @@ pub mod os_shim;
 pub mod process;
 pub mod render;
 pub mod terminal_app;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tmux;
 pub mod wezterm;
 

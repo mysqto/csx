@@ -124,32 +124,52 @@ pub fn nest(outer: Vec<Tab>, panes: &[TmuxPane], clients: &[TmuxClient]) -> Vec<
     out
 }
 
-/// Switch a client of the pane's session to the pane. Returns the client tty
-/// so the caller can focus the outer tab that hosts it.
+/// Client ttys of the pane's session, in `list-clients` order. Errors when the
+/// pane is gone or its session has no attached client.
+pub fn client_ttys(
+    pane_id: &str,
+    clients: &[TmuxClient],
+    panes: &[TmuxPane],
+) -> Result<Vec<String>> {
+    let pane = panes
+        .iter()
+        .find(|p| p.id == pane_id)
+        .ok_or_else(|| Error::other(format!("tmux pane {pane_id} not found")))?;
+    let ttys: Vec<String> = clients
+        .iter()
+        .filter(|c| c.session == pane.session)
+        .map(|c| c.tty.clone())
+        .collect();
+    if ttys.is_empty() {
+        return Err(Error::other(format!(
+            "tmux session {} has no attached client",
+            pane.session
+        )));
+    }
+    Ok(ttys)
+}
+
+/// Switch the client on `client_tty` to the pane, then select its window and
+/// the pane itself.
+pub fn focus_client(cmd: &dyn CommandRunner, pane_id: &str, client_tty: &str) -> Result<()> {
+    let dev = format!("/dev/{client_tty}");
+    cmd.run("tmux", &["switch-client", "-c", &dev, "-t", pane_id])?;
+    cmd.run("tmux", &["select-window", "-t", pane_id])?;
+    cmd.run("tmux", &["select-pane", "-t", pane_id])?;
+    Ok(())
+}
+
+/// Switch the first client of the pane's session to the pane. Returns the
+/// client tty so the caller can focus the outer tab that hosts it.
 pub fn focus(
     cmd: &dyn CommandRunner,
     pane_id: &str,
     clients: &[TmuxClient],
     panes: &[TmuxPane],
 ) -> Result<String> {
-    let pane = panes
-        .iter()
-        .find(|p| p.id == pane_id)
-        .ok_or_else(|| Error::other(format!("tmux pane {pane_id} not found")))?;
-    let client = clients
-        .iter()
-        .find(|c| c.session == pane.session)
-        .ok_or_else(|| {
-            Error::other(format!(
-                "tmux session {} has no attached client",
-                pane.session
-            ))
-        })?;
-    let dev = format!("/dev/{}", client.tty);
-    cmd.run("tmux", &["switch-client", "-c", &dev, "-t", pane_id])?;
-    cmd.run("tmux", &["select-window", "-t", pane_id])?;
-    cmd.run("tmux", &["select-pane", "-t", pane_id])?;
-    Ok(client.tty.clone())
+    let tty = client_ttys(pane_id, clients, panes)?.remove(0);
+    focus_client(cmd, pane_id, &tty)?;
+    Ok(tty)
 }
 
 #[cfg(test)]
@@ -338,6 +358,41 @@ mod tests {
         let e = focus(&f, "%9", &[], &panes).unwrap_err();
         assert!(e.to_string().contains("%9 not found"));
         assert!(f.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn client_ttys_lists_every_client_of_the_session_in_order() {
+        let panes = vec![pane("%3", "main", 1, 0)];
+        let clients = vec![
+            client("ttys004", "main"),
+            client("ttys001", "other"),
+            client("ttys002", "main"),
+        ];
+        assert_eq!(
+            client_ttys("%3", &clients, &panes).unwrap(),
+            vec!["ttys004", "ttys002"]
+        );
+        let e = client_ttys("%3", &clients[1..2], &panes).unwrap_err();
+        assert!(e.to_string().contains("no attached client"));
+        let e = client_ttys("%9", &clients, &panes).unwrap_err();
+        assert!(e.to_string().contains("%9 not found"));
+    }
+
+    #[test]
+    fn focus_client_switches_that_client() {
+        let f = Fake::new(None, None);
+        focus_client(&f, "%3", "ttys002").unwrap();
+        assert_eq!(
+            *f.calls.borrow(),
+            vec![
+                vec!["switch-client", "-c", "/dev/ttys002", "-t", "%3"],
+                vec!["select-window", "-t", "%3"],
+                vec!["select-pane", "-t", "%3"],
+            ]
+        );
+        let mut f = Fake::new(None, None);
+        f.fail_on = Some("switch-client");
+        assert!(focus_client(&f, "%3", "ttys002").is_err());
     }
 
     #[test]
