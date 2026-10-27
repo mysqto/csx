@@ -26,17 +26,40 @@ struct RawPane {
 struct Pane {
     window: u32,
     index: u32,
-    tab_id: u64,
     pane_id: u64,
     title: String,
     cwd: Option<String>,
     tty: Option<String>,
 }
 
-/// Strip `file://<host>` from a WezTerm cwd, leaving the path.
+/// Decode `%XX` escapes; an invalid escape is left as-is.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Strip `file://<host>` from a WezTerm cwd and decode the path.
 fn strip_file_url(cwd: &str) -> String {
     match cwd.strip_prefix("file://") {
-        Some(rest) => rest.find('/').map_or("", |i| &rest[i..]).to_string(),
+        Some(rest) => percent_decode(rest.find('/').map_or("", |i| &rest[i..])),
         None => cwd.to_string(),
     }
 }
@@ -64,7 +87,6 @@ fn parse_panes(json: &str) -> Result<Vec<Pane>> {
         panes.push(Pane {
             window,
             index,
-            tab_id: p.tab_id,
             pane_id: p.pane_id,
             title: p.title,
             cwd: p
@@ -112,13 +134,8 @@ impl TerminalBackend for WezTerm {
         let Some(panes) = self.panes(ports)? else {
             return Ok(None);
         };
-        let mut seen: Vec<(u32, u64)> = Vec::new();
         let mut tabs = Vec::new();
         for p in panes {
-            if seen.contains(&(p.window, p.tab_id)) {
-                continue;
-            }
-            seen.push((p.window, p.tab_id));
             tabs.push(Tab {
                 terminal: "wezterm".into(),
                 ref_: Some(format!("{REF_PREFIX}{}", p.pane_id)),
@@ -238,7 +255,7 @@ mod tests {
       {"window_id":0,"tab_id":0,"pane_id":0,"workspace":"default","title":"zsh",
        "cwd":"file://mac.local/Users/x/proj","tty_name":"/dev/ttys003"},
       {"window_id":0,"tab_id":0,"pane_id":1,"workspace":"default","title":"split",
-       "cwd":"file://mac.local/Users/x/other","tty_name":"/dev/ttys004"},
+       "cwd":"file://mac.local/Users/x/My%20Caf%C3%A9%zz","tty_name":"/dev/ttys004"},
       {"window_id":0,"tab_id":3,"pane_id":5,"workspace":"default","title":"vim",
        "cwd":"/plain/path","tty_name":"ttys005"},
       {"window_id":7,"tab_id":9,"pane_id":8,"workspace":"w","title":"other",
@@ -273,7 +290,7 @@ mod tests {
         let tabs = r.unwrap().unwrap();
         assert_eq!(calls[0], "pgrep -x wezterm-gui");
         assert_eq!(calls[1], "wezterm cli list --format json");
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 5);
         assert_eq!(WezTerm.id(), "wezterm");
         let t = &tabs[0];
         assert_eq!(t.terminal, "wezterm");
@@ -282,12 +299,16 @@ mod tests {
         assert_eq!(t.cwd.as_deref(), Some("/Users/x/proj"));
         assert_eq!(t.tty.as_deref(), Some("ttys003"));
         assert_eq!((t.window, t.index), (1, 1));
-        assert_eq!(tabs[1].cwd.as_deref(), Some("/plain/path"));
-        assert_eq!(tabs[1].tty.as_deref(), Some("ttys005"));
-        assert_eq!((tabs[1].window, tabs[1].index), (1, 2));
-        assert_eq!((tabs[2].window, tabs[2].index), (2, 1));
-        assert_eq!((tabs[2].cwd.clone(), tabs[2].tty.clone()), (None, None));
-        assert_eq!((tabs[3].window, tabs[3].index), (2, 2));
+        assert_eq!(tabs[1].ref_.as_deref(), Some("wezterm:1"));
+        assert_eq!(tabs[1].cwd.as_deref(), Some("/Users/x/My Café%zz"));
+        assert_eq!(tabs[1].tty.as_deref(), Some("ttys004"));
+        assert_eq!((tabs[1].window, tabs[1].index), (1, 1));
+        assert_eq!(tabs[2].cwd.as_deref(), Some("/plain/path"));
+        assert_eq!(tabs[2].tty.as_deref(), Some("ttys005"));
+        assert_eq!((tabs[2].window, tabs[2].index), (1, 2));
+        assert_eq!((tabs[3].window, tabs[3].index), (2, 1));
+        assert_eq!((tabs[3].cwd.clone(), tabs[3].tty.clone()), (None, None));
+        assert_eq!((tabs[4].window, tabs[4].index), (2, 2));
     }
 
     #[test]

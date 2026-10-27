@@ -28,6 +28,8 @@ struct RawWindow {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
     foreground_processes: Vec<Fg>,
 }
 
@@ -43,11 +45,8 @@ struct RawOsWindow {
     tabs: Vec<RawTab>,
 }
 
-struct Entry {
-    tab: Tab,
-    /// Tty of every window in the tab.
-    ttys: Vec<(u64, Option<String>)>,
-}
+/// One row per kitty window (split), with the kitty window id.
+type Entry = (u64, Tab);
 
 fn parse_entries(json: &str, procs: &ProcessTable) -> Result<Vec<Entry>> {
     let os: Vec<RawOsWindow> =
@@ -55,34 +54,27 @@ fn parse_entries(json: &str, procs: &ProcessTable) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for (wi, w) in os.iter().enumerate() {
         for (ti, t) in w.tabs.iter().enumerate() {
-            let ttys: Vec<(u64, Option<String>)> = t
-                .windows
-                .iter()
-                .map(|win| {
-                    let tty = win
-                        .foreground_processes
-                        .first()
-                        .and_then(|f| procs.get(f.pid))
-                        .and_then(|p| p.tty.clone());
-                    (win.id, tty)
-                })
-                .collect();
-            let Some(first) = t.windows.first() else {
-                continue;
-            };
-            entries.push(Entry {
-                tab: Tab {
-                    terminal: "kitty".into(),
-                    ref_: Some(format!("{REF_PREFIX}{}", first.id)),
-                    title: first.title.clone(),
-                    cwd: first.cwd.clone().filter(|c| !c.is_empty()),
-                    tty: ttys[0].1.clone(),
-                    window: wi as u32 + 1,
-                    index: ti as u32 + 1,
-                    agent: None,
-                },
-                ttys,
-            });
+            for win in &t.windows {
+                let tty = win
+                    .foreground_processes
+                    .first()
+                    .and_then(|f| procs.get(f.pid))
+                    .and_then(|p| p.tty.clone())
+                    .or_else(|| win.pid.and_then(|pid| procs.get(pid)?.tty.clone()));
+                entries.push((
+                    win.id,
+                    Tab {
+                        terminal: "kitty".into(),
+                        ref_: Some(format!("{REF_PREFIX}{}", win.id)),
+                        title: win.title.clone(),
+                        cwd: win.cwd.clone().filter(|c| !c.is_empty()),
+                        tty,
+                        window: wi as u32 + 1,
+                        index: ti as u32 + 1,
+                        agent: None,
+                    },
+                ));
+            }
         }
     }
     Ok(entries)
@@ -105,7 +97,7 @@ impl Kitty {
         }
         let out = self
             .kitten(ports, &["ls"])
-            .map_err(|_| Error::other(REMOTE_CONTROL_HINT))?;
+            .map_err(|e| Error::other(format!("{REMOTE_CONTROL_HINT} (kitten: {e})")))?;
         let procs = ProcessTable::load(ports.cmd)?;
         parse_entries(&out, &procs).map(Some)
     }
@@ -126,7 +118,7 @@ impl TerminalBackend for Kitty {
     fn list(&self, ports: &Ports) -> Result<Option<Vec<Tab>>> {
         Ok(self
             .entries(ports)?
-            .map(|es| es.into_iter().map(|e| e.tab).collect()))
+            .map(|es| es.into_iter().map(|(_, t)| t).collect()))
     }
 
     fn focus(&self, ports: &Ports, tab_ref: &str) -> Result<()> {
@@ -141,11 +133,7 @@ impl TerminalBackend for Kitty {
         let Some(entries) = self.entries(ports)? else {
             return Ok(false);
         };
-        let hit = entries
-            .iter()
-            .flat_map(|e| e.ttys.iter())
-            .find(|(_, t)| t.as_deref() == Some(tty));
-        match hit {
+        match entries.iter().find(|(_, t)| t.tty.as_deref() == Some(tty)) {
             Some((id, _)) => self.focus_window(ports, *id).map(|_| true),
             None => Ok(false),
         }
@@ -175,7 +163,8 @@ mod tests {
                 "kitten" if !self.remote => Err(Error::other("kitten failed: no socket")),
                 "kitten" if args.contains(&"ls") => Ok(self.list.clone()),
                 "ps" => Ok("100 1 100 100 ttys001 01:00 -zsh\n\
-                            200 1 200 200 ttys002 01:00 /bin/vim\n"
+                            200 1 200 200 ttys002 01:00 /bin/vim\n\
+                            97 1 97 97 ttys003 01:00 /bin/kitty\n"
                     .into()),
                 _ => Ok(String::new()),
             }
@@ -299,7 +288,7 @@ mod tests {
         );
         assert_eq!(calls.len(), 3);
         assert_eq!(Kitty { socket: None }.id(), "kitty");
-        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs.len(), 4);
         let t = &tabs[0];
         assert_eq!(t.terminal, "kitty");
         assert_eq!(t.ref_.as_deref(), Some("kitty:11"));
@@ -307,10 +296,15 @@ mod tests {
         assert_eq!(t.cwd.as_deref(), Some("/Users/x/proj"));
         assert_eq!(t.tty.as_deref(), Some("ttys001"));
         assert_eq!((t.window, t.index), (1, 1));
-        assert_eq!((tabs[1].window, tabs[1].index), (1, 3));
-        assert_eq!((tabs[1].cwd.clone(), tabs[1].tty.clone()), (None, None));
-        assert_eq!((tabs[2].window, tabs[2].index), (2, 1));
-        assert_eq!(tabs[2].tty, None);
+        assert_eq!(tabs[1].ref_.as_deref(), Some("kitty:12"));
+        assert_eq!(tabs[1].tty.as_deref(), Some("ttys002"));
+        assert_eq!((tabs[1].window, tabs[1].index), (1, 1));
+        // No foreground process: falls back to the window pid.
+        assert_eq!((tabs[2].window, tabs[2].index), (1, 3));
+        assert_eq!(tabs[2].cwd, None);
+        assert_eq!(tabs[2].tty.as_deref(), Some("ttys003"));
+        assert_eq!((tabs[3].window, tabs[3].index), (2, 1));
+        assert_eq!(tabs[3].tty, None);
     }
 
     #[test]
@@ -346,7 +340,7 @@ mod tests {
         let (r, _, _) = run(true, false, None, |k, p| k.list(p));
         assert_eq!(
             r.unwrap_err().to_string(),
-            "kitty: turn on allow_remote_control and listen_on in kitty.conf"
+            "kitty: turn on allow_remote_control and listen_on in kitty.conf (kitten: kitten failed: no socket)"
         );
     }
 
