@@ -8,6 +8,23 @@ All notable changes to csx are documented here. The format follows
 
 _Nothing yet._
 
+## [0.2.0] - 2026-10-27
+
+### Added
+
+- **`csx tabs`** lists the tabs of Ghostty, iTerm2, Terminal.app, kitty and
+  WezTerm, and the tmux panes inside them. It shows the AI agent that runs in
+  each tab (Claude Code, Codex and other tools), with session title, last
+  prompt and busy or idle status. Options: `--agents`, `--terminal`, `--json`
+  (an object with `rows` and `warnings`), `--alfred`, `--kitty-socket` and
+  query words.
+- **`csx tabs focus <ref>`** brings a tab to the front.
+- **`csx alfred install`** installs the Alfred workflow from the binary, keeps
+  the keyword of the older Claude Tabs workflow and removes that workflow.
+- macOS only. On other systems `csx tabs` prints an empty list.
+- The iTerm2, kitty and WezTerm backends are built from documentation and are
+  not tested live.
+
 ## [0.1.1] — 2026-07-06
 
 ### Changed

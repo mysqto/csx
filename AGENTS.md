@@ -88,8 +88,8 @@ one real adapter.
 | `repo.rs`           | Stable repo-id resolution from git output.                           | consumes `GitRunner`                    |
 | `git_shim.rs`       | Real `git` subprocess adapter.                                       | `GitRunner` → **shim**                  |
 | `output.rs`         | Pure `Format` (Human/JSON) rendering of every result type.           | —                                       |
-| `cli.rs`            | clap types, per-command handlers, `dispatch`, `AskEngine` port.      | —                                       |
-| `cli_shim.rs`       | `run` — the one impure entry point (real env, stdout, on-disk db).   | **shim**                                |
+| `cli.rs`            | clap types, per-command handlers, `dispatch`, `AskEngine` and `TabsRunner` ports. | —                  |
+| `cli_shim.rs`       | `run`, the one impure entry point (real env, stdout, on-disk db), and `RealTabs`, the `TabsRunner` adapter (macOS only). | **shim** |
 | `daemon.rs`         | `Clock`, `Debouncer`, `watch_loop`, request handler / `serve_*`.     | consumes `Clock`, `FileWatcher`, `Listener`/`Conn` |
 | `clock_shim.rs`     | `SystemClock` (monotonic `Instant`).                                 | `Clock` → **shim**                      |
 | `watch_shim.rs`     | `NotifyWatcher` (the `notify` crate).                                | `FileWatcher` → **shim**                |
@@ -101,10 +101,36 @@ one real adapter.
 | `rag.rs`            | `ChatClient` port, hybrid `retrieve`, cited prompt assembly, `RagEngine` (`AskEngine` impl). | consumes `ChatClient`, `Embedder` |
 | `chat_shim.rs`      | `AnthropicChat` — the Messages HTTP adapter.                         | `ChatClient` → **shim**                 |
 | `analyze.rs`        | Session analysis (`Analyzer`, entities, prompt hashing) + store.     | consumes `Embedder`/`ChatClient` ports  |
+| `tabs/mod.rs`       | Tab and agent types, the OS ports (`OsaRunner`, `CommandRunner`, `TtyWriter`, `Sleeper`), `TerminalBackend`, sorting and query matching. | defines the ports |
+| `tabs/app.rs`       | The list pipeline (join tabs, tmux panes and agents) and `focus` routing by ref. | consumes the ports |
+| `tabs/ghostty.rs`, `iterm2.rs`, `terminal_app.rs`, `kitty.rs`, `wezterm.rs` | One `TerminalBackend` per terminal: build commands, parse output. | consume `OsaRunner` / `CommandRunner` |
+| `tabs/tmux.rs`, `tabs/process.rs` | tmux panes nested under outer tabs; the `ps` process table. | consume `CommandRunner` |
+| `tabs/render.rs`    | Pure human, JSON and Alfred rendering of a `TabsReport`.              | —                                       |
+| `tabs/os_shim.rs`   | `RealOsa`, `RealCommand`, `RealTty`, `RealSleeper`.                   | tab ports → **shim**                    |
+| `agent/*`           | `Agent` trait, `registry()`, `detect`; `claude.rs`, `codex.rs`, `generic.rs` (process-name agents). | consume `ProcessTable`   |
+| `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/`. | consumes `CommandRunner` |
 
 Data flow: **sources → `index::sync` → `Db` (FTS5/trigram + `embeddings`
 BLOBs) → `search` / `rag::retrieve` → `output` / `AskEngine` → CLI, daemon, or
 MCP surface.**
+
+---
+
+## How to add an agent
+
+An agent is an AI coding tool that `csx tabs` can recognize in the process
+table. It does not need an indexed transcript, so it has its own string id and
+does not touch `Tool` in `model.rs`.
+
+1. If the tool only needs to be recognized by its process name, add its name
+   to `GENERIC_TOOLS` in `src/agent/generic.rs` and a test next to the others.
+2. If the tool keeps local session data (id, title, last prompt, status), add
+   `src/agent/<tool>.rs` and implement `Agent`: `tool()` (stable id),
+   `matches(process)`, and `enrich(process, ctx)` to fill an `AgentInfo`. Read files
+   under the injectable paths in `AgentContext`, never a hard-coded `~`.
+3. Register it in `registry()` in `src/agent/mod.rs`.
+4. Test with temp directories and fixture session files. No shim is needed.
+5. Add the tool to the README if users should know about it.
 
 ---
 

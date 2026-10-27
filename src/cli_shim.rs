@@ -13,7 +13,7 @@ use clap::Parser;
 
 use crate::cli::{
     dispatch, resolve_db_path, resolve_sock_path, watch_roots, AskEngine, Cli, DaemonRunner,
-    McpRunner, UnavailableAsk,
+    McpRunner, TabsRunner, UnavailableAsk,
 };
 use crate::daemon::{serve_loop, watch_loop, Debouncer};
 use crate::db::Db;
@@ -74,6 +74,106 @@ impl McpRunner for RealMcp {
     }
 }
 
+/// Real [`TabsRunner`]: builds the OS ports and the agent context, then calls
+/// the tabs pipeline or the Alfred installer. Off macOS it lists nothing and
+/// refuses the other actions.
+struct RealTabs;
+
+#[cfg(target_os = "macos")]
+impl RealTabs {
+    fn context(db: &Db) -> crate::agent::AgentContext {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        crate::cli::tabs_context(
+            home,
+            db.config_dirs("claude-code").unwrap_or_default(),
+            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+            now_ms,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl TabsRunner for RealTabs {
+    fn list(
+        &self,
+        db: &Db,
+        opts: &crate::tabs::app::ListOptions,
+        kitty_socket: Option<String>,
+    ) -> Result<crate::tabs::TabsReport> {
+        use crate::tabs::os_shim::{RealCommand, RealOsa, RealSleeper, RealTty};
+        let ports = crate::tabs::Ports {
+            osa: &RealOsa,
+            cmd: &RealCommand,
+            tty: &RealTty,
+            sleep: &RealSleeper,
+        };
+        Ok(crate::tabs::app::list(
+            &ports,
+            &crate::tabs::app::backends(kitty_socket),
+            &crate::agent::registry(),
+            &Self::context(db),
+            opts,
+        ))
+    }
+
+    fn focus(&self, tab_ref: &str) -> Result<()> {
+        use crate::tabs::os_shim::{RealCommand, RealOsa, RealSleeper, RealTty};
+        let ports = crate::tabs::Ports {
+            osa: &RealOsa,
+            cmd: &RealCommand,
+            tty: &RealTty,
+            sleep: &RealSleeper,
+        };
+        crate::tabs::app::focus(&ports, &crate::tabs::app::backends(None), tab_ref)
+    }
+
+    fn alfred_install(
+        &self,
+        prefs: Option<std::path::PathBuf>,
+    ) -> Result<crate::alfred::InstallReport> {
+        let dir = match prefs {
+            Some(p) => p,
+            None => {
+                let home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default();
+                crate::alfred::prefs_dir(&crate::tabs::os_shim::RealCommand, &home)
+            }
+        };
+        crate::alfred::install(&dir)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl TabsRunner for RealTabs {
+    fn list(
+        &self,
+        _db: &Db,
+        _opts: &crate::tabs::app::ListOptions,
+        _kitty_socket: Option<String>,
+    ) -> Result<crate::tabs::TabsReport> {
+        Ok(crate::tabs::TabsReport::default())
+    }
+
+    fn focus(&self, _tab_ref: &str) -> Result<()> {
+        Err(Error::other("csx tabs is supported on macOS only"))
+    }
+
+    fn alfred_install(
+        &self,
+        _prefs: Option<std::path::PathBuf>,
+    ) -> Result<crate::alfred::InstallReport> {
+        Err(Error::other("csx tabs is supported on macOS only"))
+    }
+}
+
 /// Build the default set of sources from the environment (Claude Code + Codex).
 fn default_sources() -> Vec<Box<dyn SessionSource>> {
     vec![
@@ -127,6 +227,7 @@ pub fn run() -> Result<()> {
         engine.as_ref(),
         &RealDaemon,
         &RealMcp,
+        &RealTabs,
         &mut lock,
     )
 }

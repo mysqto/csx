@@ -200,6 +200,93 @@ these; they are ANDed together:
 
 ---
 
+## Terminal tabs and Alfred
+
+`csx tabs` lists the tabs of your terminal apps. It also shows which tab
+runs an AI coding agent, such as Claude Code or Codex. You can then jump to
+any tab from the command line or from Alfred. This feature works on macOS
+only. On other systems `csx tabs` prints an empty list.
+
+```sh
+csx tabs                      # every tab of every running terminal
+csx tabs --agents             # only tabs that run an agent
+csx tabs --terminal ghostty   # only one terminal (repeat the flag for more)
+csx tabs fix login            # only rows that match every word
+csx tabs --json               # {"rows": [...], "warnings": [...]}
+csx tabs --alfred             # Alfred script filter JSON
+csx tabs focus <ref>          # bring one tab to the front
+csx alfred install            # install or update the Alfred workflow
+```
+
+`--json` prints one object. `rows` holds the tabs. `warnings` holds short
+messages about terminals that could not be read. `--alfred` and `--json`
+cannot be used together. Each row has a `ref`. Pass it to `csx tabs focus`.
+A row can have no `ref`. You cannot focus it, but you can still copy from it.
+
+### Supported terminals
+
+| Terminal     | Status                                |
+| ------------ | ------------------------------------- |
+| Ghostty 1.3+ | Checked live in a later task          |
+| Terminal.app | Checked live in a later task          |
+| iTerm2       | Built from documentation, not tested live |
+| kitty        | Built from documentation, not tested live |
+| WezTerm      | Built from documentation, not tested live |
+
+tmux panes are listed under the terminal tab that shows their client.
+
+### kitty setup
+
+kitty must allow remote control. Add these lines to `kitty.conf`, then
+restart kitty:
+
+```
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+csx finds the socket in `KITTY_LISTEN_ON`. You can also pass it with
+`--kitty-socket unix:/tmp/kitty`.
+
+### Ghostty title flash
+
+Ghostty does not report the tty of a tab. To focus an agent that csx cannot
+match by title, `csx tabs focus` briefly sets the tab title to a marker. It
+then puts the old title back. You may see the title flash for up to about
+one second. Listing never does this.
+
+### Permission prompt
+
+The first time csx reads or focuses a terminal, macOS asks whether to allow
+the app that runs csx (or Alfred) to control that terminal. Click Allow.
+macOS asks once for each terminal app. You can change the choice later in
+System Settings, under Privacy & Security, then Automation.
+
+### Alfred workflow
+
+Run this once, and again after you update csx:
+
+```sh
+csx alfred install
+```
+
+It finds your Alfred preferences folder, including a sync folder, and writes
+the workflow there. Use `--prefs <path to Alfred.alfredpreferences>` to
+choose the folder yourself. If you used the older Claude Tabs workflow, csx
+keeps your keyword and removes the old workflow.
+
+Then set the hotkeys in Alfred:
+
+1. Open Alfred Preferences, then Workflows, then csx tabs.
+2. Click the hotkey box of "Terminal tabs" (keyword `tt`) and press a key.
+3. Do the same for "AI sessions" (keyword `ct`).
+
+In the result list, press Return to focus the tab. Press Cmd+Return to copy
+the session id (or the working directory). Press Option+Return to copy a
+resume command, when the agent supports one. Alfred does not read your shell
+PATH. The workflow looks for `csx` in the usual install folders. If yours is
+elsewhere, set the `csx_path` workflow variable.
+
 ## The multi-tool adapter model
 
 `csx` treats each AI-coding tool as a **`SessionSource`** — an adapter that

@@ -9,8 +9,11 @@
 //! thin wrapper the tests bypass.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+
+use crate::alfred::InstallReport;
 
 use crate::db::{Db, Scope, SearchOpts};
 use crate::error::{Error, Result};
@@ -21,6 +24,9 @@ use crate::output::{
     render_sync_stats, Format,
 };
 use crate::source::SessionSource;
+use crate::tabs::app::ListOptions;
+use crate::tabs::render::{render_alfred_with_home, render_human, render_json};
+use crate::tabs::TabsReport;
 
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
@@ -97,6 +103,38 @@ impl ScopeArgs {
     }
 }
 
+/// Subcommands of `csx tabs`.
+#[derive(Debug, Subcommand)]
+pub enum TabsAction {
+    /// Focus a tab by ref.
+    Focus {
+        /// A ref from `csx tabs`, such as `ghostty:<id>` or `tty:ttys012`.
+        tab_ref: String,
+    },
+}
+
+/// Subcommands of `csx alfred`.
+#[derive(Debug, Subcommand)]
+pub enum AlfredAction {
+    /// Install or update the workflow.
+    Install {
+        /// Alfred preferences folder; found automatically when omitted.
+        #[arg(long)]
+        prefs: Option<PathBuf>,
+    },
+}
+
+/// How `csx tabs` prints its report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabsOutput {
+    /// Aligned text for people.
+    Human,
+    /// `{"rows": [...], "warnings": [...]}`.
+    Json,
+    /// Alfred script filter JSON.
+    Alfred,
+}
+
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -154,6 +192,37 @@ pub enum Command {
         /// Emit as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// List terminal tabs and the AI agents running in them, or focus one.
+    #[command(args_conflicts_with_subcommands = true)]
+    Tabs {
+        /// Focus a tab instead of listing.
+        #[command(subcommand)]
+        action: Option<TabsAction>,
+        /// Show only tabs that run an agent.
+        #[arg(long)]
+        agents: bool,
+        /// Show only this terminal (repeatable): ghostty, iterm2, terminal,
+        /// kitty, wezterm, tmux.
+        #[arg(long = "terminal")]
+        terminals: Vec<String>,
+        /// Emit `{"rows": [...], "warnings": [...]}` as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Emit Alfred script filter JSON.
+        #[arg(long, conflicts_with = "json")]
+        alfred: bool,
+        /// kitty remote-control socket, such as `unix:/tmp/kitty`.
+        #[arg(long)]
+        kitty_socket: Option<String>,
+        /// Words that every listed row must match.
+        query: Vec<String>,
+    },
+    /// Manage the Alfred workflow.
+    Alfred {
+        /// What to do.
+        #[command(subcommand)]
+        action: AlfredAction,
     },
     /// Ask a natural-language question (retrieval-augmented answer).
     Ask {
@@ -227,6 +296,85 @@ pub trait DaemonRunner {
 pub trait McpRunner {
     /// Serve MCP requests against `db` (and `engine`) until stdin reaches EOF.
     fn serve(&self, db: &Db, engine: &dyn AskEngine) -> Result<()>;
+}
+
+/// Port for the terminal tab features.
+///
+/// Defined as a port so `dispatch` reaches the tabs code only through it; the
+/// real adapter ([`crate::cli_shim`]) builds the OS ports and the agent
+/// context, and answers "macOS only" on other platforms.
+pub trait TabsRunner {
+    /// List tabs and agents.
+    fn list(&self, db: &Db, opts: &ListOptions, kitty_socket: Option<String>)
+        -> Result<TabsReport>;
+    /// Focus the tab named by `tab_ref`.
+    fn focus(&self, tab_ref: &str) -> Result<()>;
+    /// Install or update the Alfred workflow; `prefs` overrides discovery.
+    fn alfred_install(&self, prefs: Option<PathBuf>) -> Result<InstallReport>;
+}
+
+/// Build the agent context from explicit environment values: `~/.claude`, then
+/// the Claude config dirs the index knows, then `CLAUDE_CONFIG_DIR`; the Codex
+/// home is `CODEX_HOME` or `~/.codex`. Duplicates are left to the consumer.
+pub fn tabs_context(
+    home: PathBuf,
+    indexed_claude_dirs: Vec<String>,
+    claude_config_dir: Option<PathBuf>,
+    codex_home: Option<PathBuf>,
+    now_ms: i64,
+) -> crate::agent::AgentContext {
+    let mut claude_dirs = vec![home.join(".claude")];
+    claude_dirs.extend(indexed_claude_dirs.into_iter().map(PathBuf::from));
+    claude_dirs.extend(claude_config_dir);
+    let codex_home = codex_home.unwrap_or_else(|| home.join(".codex"));
+    crate::agent::AgentContext {
+        home,
+        claude_dirs,
+        codex_home,
+        now_ms,
+    }
+}
+
+/// Handle `csx tabs`: list through the runner and render in `output`.
+/// `home` shortens working directories in the Alfred output.
+pub fn handle_tabs(
+    db: &Db,
+    tabs: &dyn TabsRunner,
+    opts: &ListOptions,
+    kitty_socket: Option<String>,
+    output: TabsOutput,
+    home: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let report = tabs.list(db, opts, kitty_socket)?;
+    let text = match output {
+        TabsOutput::Human => render_human(&report),
+        TabsOutput::Json => render_json(&report),
+        TabsOutput::Alfred => render_alfred_with_home(&report, home),
+    };
+    writeln!(out, "{}", text.trim_end_matches('\n'))?;
+    Ok(())
+}
+
+/// Handle `csx alfred install`: install and report what happened.
+pub fn handle_alfred_install(
+    tabs: &dyn TabsRunner,
+    prefs: Option<PathBuf>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let report = tabs.alfred_install(prefs)?;
+    writeln!(out, "installed the workflow in {}", report.dir.display())?;
+    if let Some(keyword) = &report.migrated_keyword {
+        writeln!(out, "migrated keyword {keyword}")?;
+    }
+    if report.removed_old {
+        writeln!(out, "removed the old Claude Tabs workflow")?;
+    }
+    writeln!(
+        out,
+        "macOS asks once to allow Alfred to control each terminal app"
+    )?;
+    Ok(())
 }
 
 /// Handle the `sync` command: run the indexer over `sources` and report stats.
@@ -339,7 +487,7 @@ pub fn handle_ask(
 /// to `out`. This is the testable core of the CLI; [`run`] supplies the real
 /// dependencies.
 // A wiring hub: it forwards each command to a handler using one injected port
-// per side effect (db, sources, git, ask, daemon, mcp) plus the output sink.
+// per side effect (db, sources, git, ask, daemon, mcp, tabs) plus the output sink.
 // Bundling these into a struct would only relocate the same fan-out.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch(
@@ -350,6 +498,7 @@ pub fn dispatch(
     engine: &dyn AskEngine,
     daemon: &dyn DaemonRunner,
     mcp: &dyn McpRunner,
+    tabs: &dyn TabsRunner,
     out: &mut dyn Write,
 ) -> Result<()> {
     match cli.command {
@@ -375,6 +524,35 @@ pub fn dispatch(
         }) => handle_ask(db, engine, &question, &scope.to_scope(), limit, json, out),
         Some(Command::Serve) => daemon.serve(db, sources, git),
         Some(Command::Mcp) => mcp.serve(db, engine),
+        Some(Command::Tabs {
+            action: Some(TabsAction::Focus { tab_ref }),
+            ..
+        }) => tabs.focus(&tab_ref),
+        Some(Command::Tabs {
+            action: None,
+            agents,
+            terminals,
+            json,
+            alfred,
+            kitty_socket,
+            query,
+        }) => {
+            let output = match (json, alfred) {
+                (true, _) => TabsOutput::Json,
+                (_, true) => TabsOutput::Alfred,
+                _ => TabsOutput::Human,
+            };
+            let opts = ListOptions {
+                agents_only: agents,
+                terminals,
+                query,
+            };
+            let home = std::env::var("HOME").ok();
+            handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
+        }
+        Some(Command::Alfred {
+            action: AlfredAction::Install { prefs },
+        }) => handle_alfred_install(tabs, prefs, out),
         None => {
             writeln!(out, "csx {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
@@ -730,6 +908,7 @@ mod tests {
             &engine,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -744,6 +923,7 @@ mod tests {
             &engine,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -760,6 +940,7 @@ mod tests {
             &engine,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -778,6 +959,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -800,6 +982,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -815,6 +998,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -833,6 +1017,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -847,6 +1032,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -867,6 +1053,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -887,6 +1074,7 @@ mod tests {
             &UnavailableAsk,
             &runner,
             &runner,
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -903,6 +1091,7 @@ mod tests {
             &UnavailableAsk,
             &runner,
             &runner,
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -939,6 +1128,7 @@ mod tests {
             &UnavailableAsk,
             &FailRunner,
             &FailRunner,
+            &NoTabs,
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -952,6 +1142,7 @@ mod tests {
             &UnavailableAsk,
             &FailRunner,
             &FailRunner,
+            &NoTabs,
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -983,6 +1174,7 @@ mod tests {
             &FakeAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -1002,6 +1194,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut Vec::new(),
         )
         .unwrap_err();
@@ -1058,6 +1251,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -1075,6 +1269,7 @@ mod tests {
             &UnavailableAsk,
             &FakeRunner::default(),
             &FakeRunner::default(),
+            &NoTabs,
             &mut buf,
         )
         .unwrap();
@@ -1202,5 +1397,334 @@ mod tests {
         // it surfaces an error if ever invoked.
         let err = NoGit.run("/tmp", &["rev-parse"]).unwrap_err();
         assert!(err.to_string().contains("git should not be called"));
+    }
+
+    // ---- tabs and alfred ---------------------------------------------------
+
+    /// A writer that accepts `ok_lines` newline-terminated writes, then fails.
+    struct LimitWriter {
+        ok_lines: usize,
+    }
+    impl Write for LimitWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.contains(&b'\n') {
+                if self.ok_lines == 0 {
+                    return Err(std::io::Error::other("boom"));
+                }
+                self.ok_lines -= 1;
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn tabs_and_alfred_handlers_propagate_write_errors() {
+        let db = fixture_db();
+        let tabs = FakeTabs {
+            install: Some(install_report(Some("ct"), true)),
+            ..Default::default()
+        };
+        let opts = ListOptions::default();
+        handle_tabs(
+            &db,
+            &tabs,
+            &opts,
+            None,
+            TabsOutput::Human,
+            None,
+            &mut FailWriter,
+        )
+        .unwrap_err();
+        // The report has four lines, so failing after 0..=3 lines hits each write.
+        for ok_lines in 0..4 {
+            handle_alfred_install(&tabs, None, &mut LimitWriter { ok_lines }).unwrap_err();
+        }
+        handle_alfred_install(&tabs, None, &mut LimitWriter { ok_lines: 4 }).unwrap();
+    }
+
+    /// Tabs runner for tests that never reach the tabs code.
+    struct NoTabs;
+    impl TabsRunner for NoTabs {
+        fn list(&self, _: &Db, _: &ListOptions, _: Option<String>) -> Result<TabsReport> {
+            Err(Error::other("tabs should not be called"))
+        }
+        fn focus(&self, _: &str) -> Result<()> {
+            Err(Error::other("tabs should not be called"))
+        }
+        fn alfred_install(&self, _: Option<PathBuf>) -> Result<InstallReport> {
+            Err(Error::other("tabs should not be called"))
+        }
+    }
+
+    /// Records what dispatch passes to the tabs runner and answers from fields.
+    #[derive(Default)]
+    struct FakeTabs {
+        report: TabsReport,
+        install: Option<InstallReport>,
+        fail: bool,
+        seen: RefCell<Vec<String>>,
+    }
+    impl TabsRunner for FakeTabs {
+        fn list(
+            &self,
+            _: &Db,
+            opts: &ListOptions,
+            kitty_socket: Option<String>,
+        ) -> Result<TabsReport> {
+            self.seen
+                .borrow_mut()
+                .push(format!("list {opts:?} {kitty_socket:?}"));
+            if self.fail {
+                return Err(Error::other("tabs boom"));
+            }
+            Ok(self.report.clone())
+        }
+        fn focus(&self, tab_ref: &str) -> Result<()> {
+            self.seen.borrow_mut().push(format!("focus {tab_ref}"));
+            if self.fail {
+                return Err(Error::other("tabs boom"));
+            }
+            Ok(())
+        }
+        fn alfred_install(&self, prefs: Option<PathBuf>) -> Result<InstallReport> {
+            self.seen.borrow_mut().push(format!("install {prefs:?}"));
+            if self.fail {
+                return Err(Error::other("tabs boom"));
+            }
+            Ok(self.install.clone().unwrap())
+        }
+    }
+
+    fn run_tabs(args: &[&str], tabs: &FakeTabs) -> Result<String> {
+        let mut buf = Vec::new();
+        dispatch(
+            parse(args),
+            &fixture_db(),
+            &no_sources(),
+            &NoGit,
+            &UnavailableAsk,
+            &FakeRunner::default(),
+            &FakeRunner::default(),
+            tabs,
+            &mut buf,
+        )?;
+        Ok(as_str(&buf).to_string())
+    }
+
+    fn one_tab_report() -> TabsReport {
+        TabsReport {
+            rows: vec![crate::tabs::Tab {
+                terminal: "ghostty".into(),
+                ref_: Some("ghostty:abc".into()),
+                title: "my tab".into(),
+                window: 1,
+                index: 1,
+                ..Default::default()
+            }],
+            warnings: vec!["kitty: no socket".into()],
+        }
+    }
+
+    #[test]
+    fn parses_tabs_flags_and_query() {
+        let cli = parse(&[
+            "csx",
+            "tabs",
+            "--agents",
+            "--terminal",
+            "ghostty",
+            "--terminal",
+            "tmux",
+            "--json",
+            "--kitty-socket",
+            "unix:/tmp/k",
+            "fix",
+            "bug",
+        ]);
+        assert_eq!(
+            format!("{:?}", cli.command),
+            "Some(Tabs { action: None, agents: true, terminals: [\"ghostty\", \"tmux\"], \
+             json: true, alfred: false, kitty_socket: Some(\"unix:/tmp/k\"), \
+             query: [\"fix\", \"bug\"] })"
+        );
+    }
+
+    #[test]
+    fn parses_tabs_focus_subcommand() {
+        assert_eq!(
+            format!(
+                "{:?}",
+                parse(&["csx", "tabs", "focus", "tty:ttys012"]).command
+            ),
+            "Some(Tabs { action: Some(Focus { tab_ref: \"tty:ttys012\" }), agents: false, \
+             terminals: [], json: false, alfred: false, kitty_socket: None, query: [] })"
+        );
+        // After a list flag, "focus" is an ordinary query word.
+        let cli = parse(&["csx", "tabs", "--agents", "focus", "x"]);
+        assert!(format!("{:?}", cli.command).contains("action: None"));
+        assert!(format!("{:?}", cli.command).contains("query: [\"focus\", \"x\"]"));
+    }
+
+    #[test]
+    fn alfred_conflicts_with_json() {
+        assert!(Cli::try_parse_from(["csx", "tabs", "--alfred", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["csx", "tabs", "--alfred"]).is_ok());
+    }
+
+    #[test]
+    fn parses_alfred_install_prefs() {
+        let cli = parse(&[
+            "csx",
+            "alfred",
+            "install",
+            "--prefs",
+            "/p/Alfred.alfredpreferences",
+        ]);
+        assert_eq!(
+            format!("{:?}", cli.command),
+            "Some(Alfred { action: Install { prefs: Some(\"/p/Alfred.alfredpreferences\") } })"
+        );
+        assert_eq!(
+            format!("{:?}", parse(&["csx", "alfred", "install"]).command),
+            "Some(Alfred { action: Install { prefs: None } })"
+        );
+    }
+
+    #[test]
+    fn dispatch_tabs_renders_each_output() {
+        let tabs = FakeTabs {
+            report: one_tab_report(),
+            ..Default::default()
+        };
+        let human = run_tabs(&["csx", "tabs"], &tabs).unwrap();
+        assert!(human.contains("TERMINAL") && human.contains("my tab"));
+        assert!(human.contains("warning: kitty: no socket"));
+        assert!(human.ends_with("ghostty:abc\n") && !human.ends_with("\n\n"));
+
+        let json = run_tabs(&["csx", "tabs", "--json"], &tabs).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["rows"][0]["ref"], "ghostty:abc");
+        assert_eq!(v["warnings"][0], "kitty: no socket");
+
+        let alfred = run_tabs(&["csx", "tabs", "--alfred"], &tabs).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&alfred).unwrap();
+        assert!(v["items"].as_array().unwrap().len() >= 2);
+
+        // Options reach the runner.
+        run_tabs(
+            &[
+                "csx",
+                "tabs",
+                "--agents",
+                "--terminal",
+                "kitty",
+                "--kitty-socket",
+                "s",
+                "a",
+                "b",
+            ],
+            &tabs,
+        )
+        .unwrap();
+        let seen = tabs.seen.borrow();
+        let last = seen.last().unwrap();
+        assert!(last.contains("agents_only: true"), "{last}");
+        assert!(
+            last.contains("\"kitty\"") && last.contains("\"a\", \"b\""),
+            "{last}"
+        );
+        assert!(last.ends_with("Some(\"s\")"), "{last}");
+    }
+
+    #[test]
+    fn dispatch_tabs_focus_calls_runner() {
+        let tabs = FakeTabs::default();
+        let out = run_tabs(&["csx", "tabs", "focus", "ghostty:abc"], &tabs).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(*tabs.seen.borrow(), ["focus ghostty:abc"]);
+    }
+
+    fn install_report(migrated: Option<&str>, removed_old: bool) -> InstallReport {
+        InstallReport {
+            dir: PathBuf::from("/prefs/workflows/csx-tabs"),
+            migrated_keyword: migrated.map(str::to_string),
+            removed_old,
+        }
+    }
+
+    #[test]
+    fn dispatch_alfred_install_prints_report() {
+        let notice = "macOS asks once to allow Alfred to control each terminal app";
+        let tabs = FakeTabs {
+            install: Some(install_report(Some("ct"), true)),
+            ..Default::default()
+        };
+        let out = run_tabs(&["csx", "alfred", "install", "--prefs", "/p"], &tabs).unwrap();
+        assert!(out.contains("/prefs/workflows/csx-tabs"));
+        assert!(out.contains("migrated keyword ct"));
+        assert!(out.contains("removed the old Claude Tabs workflow"));
+        assert!(out.contains(notice));
+        assert_eq!(*tabs.seen.borrow(), ["install Some(\"/p\")"]);
+
+        let tabs = FakeTabs {
+            install: Some(install_report(None, false)),
+            ..Default::default()
+        };
+        let out = run_tabs(&["csx", "alfred", "install"], &tabs).unwrap();
+        assert!(!out.contains("migrated") && !out.contains("removed"));
+        assert!(out.contains(notice));
+        assert_eq!(*tabs.seen.borrow(), ["install None"]);
+    }
+
+    #[test]
+    fn dispatch_tabs_propagates_runner_error() {
+        let tabs = FakeTabs {
+            fail: true,
+            ..Default::default()
+        };
+        for args in [
+            &["csx", "tabs"][..],
+            &["csx", "tabs", "focus", "x:y"],
+            &["csx", "alfred", "install"],
+        ] {
+            let err = run_tabs(args, &tabs).unwrap_err();
+            assert!(err.to_string().contains("tabs boom"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn no_tabs_fake_errors_on_every_port() {
+        let db = fixture_db();
+        assert!(NoTabs.list(&db, &ListOptions::default(), None).is_err());
+        assert!(NoTabs.focus("x").is_err());
+        assert!(NoTabs.alfred_install(None).is_err());
+    }
+
+    #[test]
+    fn tabs_context_orders_dirs_and_defaults_codex_home() {
+        let ctx = tabs_context(
+            PathBuf::from("/h"),
+            vec!["/idx/.claude".into()],
+            Some(PathBuf::from("/env/claude")),
+            None,
+            42,
+        );
+        assert_eq!(
+            ctx.claude_dirs,
+            [
+                PathBuf::from("/h/.claude"),
+                PathBuf::from("/idx/.claude"),
+                PathBuf::from("/env/claude")
+            ]
+        );
+        assert_eq!(ctx.codex_home, PathBuf::from("/h/.codex"));
+        assert_eq!((ctx.home, ctx.now_ms), (PathBuf::from("/h"), 42));
+
+        let ctx = tabs_context(PathBuf::from("/h"), vec![], None, Some("/c".into()), 0);
+        assert_eq!(ctx.claude_dirs, [PathBuf::from("/h/.claude")]);
+        assert_eq!(ctx.codex_home, PathBuf::from("/c"));
     }
 }

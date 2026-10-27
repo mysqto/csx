@@ -38,7 +38,8 @@ pub use analyze::{
 };
 pub use chat_shim::AnthropicChat;
 pub use cli::{
-    resolve_sock_path, watch_roots, AskEngine, Cli, Command, DaemonRunner, McpRunner, ScopeArgs,
+    resolve_sock_path, watch_roots, AlfredAction, AskEngine, Cli, Command, DaemonRunner, McpRunner,
+    ScopeArgs, TabsAction, TabsOutput, TabsRunner,
 };
 pub use cli_shim::run;
 pub use clock_shim::SystemClock;
