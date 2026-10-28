@@ -1,8 +1,34 @@
 import { homedir } from "node:os";
-import { Action, ActionPanel, closeMainWindow, Color, Icon, Keyboard, List, showHUD } from "@raycast/api";
-import { showFailureToast, usePromise } from "@raycast/utils";
-import { CsxMissingError, focusTab, listTabs } from "./lib/csx";
-import { Row, rowCwd, rowKey, rowKeywords, rowPrompt, rowTitle, shortenHome, terminalName, toolName } from "./lib/rows";
+import {
+  Action,
+  ActionPanel,
+  closeMainWindow,
+  Color,
+  Icon,
+  Keyboard,
+  List,
+  showHUD,
+  useNavigation,
+} from "@raycast/api";
+import { TerminalPicker, resumeIn, TERMINAL_KEY } from "./terminal-picker";
+import { showFailureToast, useLocalStorage, usePromise } from "@raycast/utils";
+import { savedChoice, resumeTitle, TerminalChoice } from "./lib/terminals";
+import { CsxMissingError, focusTab, listTabs, listTerminals } from "./lib/csx";
+import {
+  ClosedSession,
+  closedKeywords,
+  closedPrompt,
+  closedTitle,
+  Row,
+  rowCwd,
+  rowKey,
+  rowKeywords,
+  rowPrompt,
+  rowTitle,
+  shortenHome,
+  terminalName,
+  toolName,
+} from "./lib/rows";
 
 const INSTALL_COMMAND =
   "brew tap mysqto/csx https://github.com/mysqto/csx && brew trust mysqto/csx && brew install --cask csx";
@@ -80,6 +106,71 @@ function RowActions({ row, reload }: { row: Row; reload: () => void }) {
   );
 }
 
+function ClosedActions({
+  session,
+  saved,
+  savedId,
+  onSaved,
+}: {
+  session: ClosedSession;
+  saved: TerminalChoice | undefined;
+  savedId: string | undefined;
+  onSaved: (id: string) => void;
+}) {
+  const { push } = useNavigation();
+  return (
+    <ActionPanel>
+      <Action
+        title={resumeTitle(saved)}
+        icon={Icon.Play}
+        onAction={() =>
+          saved
+            ? resumeIn(session, saved, false)
+            : push(<TerminalPicker session={session} save savedId={savedId} onSaved={onSaved} />)
+        }
+      />
+      <Action
+        title="Resume in Another Terminal…"
+        icon={Icon.Terminal}
+        shortcut={{ modifiers: ["cmd"], key: "t" }}
+        onAction={() => push(<TerminalPicker session={session} save={false} savedId={savedId} />)}
+      />
+      <Action
+        title="Change Default Terminal…"
+        icon={Icon.Gear}
+        shortcut={{ modifiers: ["cmd", "shift"], key: "t" }}
+        onAction={() => push(<TerminalPicker save={false} savedId={savedId} onSaved={onSaved} />)}
+      />
+      {session.resume_command && (
+        <Action.CopyToClipboard
+          title="Copy Resume Command"
+          content={session.resume_command}
+          shortcut={Keyboard.Shortcut.Common.Copy}
+        />
+      )}
+      <Action.CopyToClipboard
+        title="Copy Session ID"
+        content={session.session_id}
+        shortcut={{ modifiers: ["cmd", "shift"], key: "i" }}
+      />
+      {session.cwd && (
+        <Action.CopyToClipboard
+          title="Copy Working Directory"
+          content={session.cwd}
+          shortcut={Keyboard.Shortcut.Common.CopyPath}
+        />
+      )}
+    </ActionPanel>
+  );
+}
+
+function closedSubtitle(c: ClosedSession): string {
+  const parts = [toolName(c.tool), shortenHome(c.cwd, HOME)];
+  const prompt = closedPrompt(c);
+  if (prompt) parts.push(`“${prompt}”`);
+  return parts.filter(Boolean).join(" · ");
+}
+
 function ErrorView({ error, reload }: { error: Error; reload: () => void }) {
   if (error instanceof CsxMissingError) {
     return (
@@ -119,7 +210,11 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
       if (!(e instanceof CsxMissingError)) showFailureToast(e, { title: "csx failed" });
     },
   });
+  const { value: savedId, setValue: saveId } = useLocalStorage<string>(TERMINAL_KEY);
+  const terminals = usePromise(listTerminals, [], { execute: agentsOnly });
+  const saved = savedChoice(savedId, terminals.data ?? []);
   const rows = data?.rows ?? [];
+  const closed = data?.closed ?? [];
   const warnings = data?.warnings ?? [];
   const noun = agentsOnly ? "AI sessions" : "terminal tabs";
 
@@ -150,7 +245,7 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
           ))}
         </List.Section>
       )}
-      <List.Section title={warnings.length > 0 ? "Tabs" : undefined}>
+      <List.Section title={warnings.length > 0 || closed.length > 0 ? "Tabs" : undefined}>
         {rows.map((r, i) => (
           <List.Item
             key={rowKey(r, i)}
@@ -163,6 +258,21 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
           />
         ))}
       </List.Section>
+      {closed.length > 0 && (
+        <List.Section title="Closed Sessions">
+          {closed.map((c) => (
+            <List.Item
+              key={`${c.tool}:${c.session_id}`}
+              icon={Icon.Clock}
+              title={closedTitle(c)}
+              subtitle={closedSubtitle(c)}
+              keywords={closedKeywords(c)}
+              accessories={c.updated_at ? [{ date: new Date(c.updated_at), tooltip: "Last activity" }] : []}
+              actions={<ClosedActions session={c} saved={saved} savedId={savedId} onSaved={saveId} />}
+            />
+          ))}
+        </List.Section>
+      )}
     </List>
   );
 }

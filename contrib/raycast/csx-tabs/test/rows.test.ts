@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  closedKeywords,
+  closedTitle,
   cut,
   oneLine,
   parseReport,
@@ -169,8 +171,52 @@ test("parseReport reads the shared fixture that the csx Rust tests also check", 
   const text = readFileSync("test/fixtures/report.json", "utf8");
   const r = parseReport(text);
   const raw = JSON.parse(text);
-  assert.deepEqual(r.rows, raw.rows);
-  assert.deepEqual(r.warnings, raw.warnings);
+  assert.deepEqual(r, raw);
   assert.equal(rowTitle(r.rows[2]), "gemini");
   assert.equal(rowKey(r.rows[2], 2), "tty:ttys009#2");
+});
+
+const closedEntry = {
+  tool: "claude-code",
+  session_id: "4a5b6c7d",
+  title: "Add dark mode",
+  cwd: "/Users/me/work/acme-web",
+  last_prompt: "make the\n toggle persist",
+  updated_at: 1793150000000,
+  resume_command: "cd '/Users/me/work/acme-web' && claude --resume 4a5b6c7d",
+};
+
+test("parseReport has an empty closed list when the key is absent", () => {
+  assert.deepEqual(parseReport(report([plainRow])).closed, []);
+});
+
+test("parseReport reads closed sessions and skips malformed ones", () => {
+  const text = JSON.stringify({ rows: [], warnings: [], closed: [closedEntry, 5, { tool: 1 }, { session_id: "x" }] });
+  const r = parseReport(text);
+  assert.equal(r.closed.length, 1);
+  assert.deepEqual(r.closed[0], closedEntry);
+});
+
+test("parseReport keeps null closed fields and ignores a closed value that is not a list", () => {
+  const bare = { tool: "codex", session_id: "s1", cwd: "/x", resume_command: "codex resume s1" };
+  const r = parseReport(JSON.stringify({ rows: [], closed: [bare] }));
+  assert.equal(r.closed[0].title, null);
+  assert.equal(r.closed[0].last_prompt, null);
+  assert.equal(r.closed[0].updated_at, null);
+  assert.deepEqual(parseReport(JSON.stringify({ rows: [], closed: "nope" })).closed, []);
+});
+
+test("closedTitle falls back to the session id and keeps hostile text", () => {
+  const r = parseReport(JSON.stringify({ rows: [], closed: [{ ...closedEntry, title: "<b>$(rm -rf ~)</b>; `x`" }] }));
+  assert.equal(closedTitle(r.closed[0]), "<b>$(rm -rf ~)</b>; `x`");
+  assert.equal(closedTitle({ ...closedEntry, title: null }), "4a5b6c7d");
+  assert.equal(closedTitle({ ...closedEntry, title: "" }), "4a5b6c7d");
+});
+
+test("closedKeywords holds tool, folder names, session id and prompt words", () => {
+  const k = closedKeywords(closedEntry);
+  for (const w of ["claude-code", "Claude", "Code", "acme-web", "work", "4a5b6c7d", "toggle", "persist"]) {
+    assert.ok(k.includes(w), w);
+  }
+  assert.equal(new Set(k).size, k.length);
 });

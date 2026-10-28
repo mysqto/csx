@@ -5,10 +5,22 @@ The extension supports Ghostty, iTerm2, Terminal, kitty, WezTerm and tmux.
 
 ## Commands
 
-- Search AI Sessions lists the tabs that run Claude Code, Codex, Gemini CLI, Cursor Agent or another AI coding agent. Each row shows the session title, folder, last prompt and whether the agent is busy or idle.
+- Search AI Sessions lists the tabs that run Claude Code, Codex, Gemini CLI, Cursor Agent or another AI coding agent. Each row shows the session title, folder, last prompt and whether the agent is busy or idle. Sessions whose tab is closed show below, in the Closed Sessions section.
 - Search Terminal Tabs lists every terminal tab.
 
 Press Return to bring the tab to the front. The Action Panel can also copy the command that resumes the session, the session ID or the folder.
+
+## Resume closed sessions
+
+Closed sessions appear only in Search AI Sessions. Press Return on one to resume it in a new tab.
+
+The first time, the extension asks which terminal to use. It lists only the terminals that are installed. After the session opens, the extension remembers that terminal. Later, Return opens the session there. The action is named Resume in, then the terminal name.
+
+- Resume in Another Terminal opens the session in a terminal you pick. It does not change the saved one.
+- Change Default Terminal changes the saved terminal.
+- If the saved terminal is no longer installed, the extension asks again.
+- If the session already runs in a tab, csx brings that tab to the front.
+- If the open fails, a message tells you why. Use Resume in Another Terminal to try a different terminal.
 
 ## Setup
 

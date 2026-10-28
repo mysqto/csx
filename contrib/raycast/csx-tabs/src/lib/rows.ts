@@ -27,9 +27,21 @@ export interface Row {
   agent: Agent | null;
 }
 
+/** A session whose tab is closed, that csx can resume. */
+export interface ClosedSession {
+  tool: string;
+  session_id: string;
+  title: string | null;
+  cwd: string;
+  last_prompt: string | null;
+  updated_at: number | null;
+  resume_command: string;
+}
+
 export interface Report {
   rows: Row[];
   warnings: string[];
+  closed: ClosedSession[];
 }
 
 const PROMPT_MAX = 80;
@@ -102,6 +114,19 @@ function parseRow(v: unknown): Row | null {
   };
 }
 
+function parseClosed(v: unknown): ClosedSession | null {
+  if (!isObject(v) || typeof v.tool !== "string" || typeof v.session_id !== "string") return null;
+  return {
+    tool: v.tool,
+    session_id: v.session_id,
+    title: str(v.title),
+    cwd: str(v.cwd) ?? "",
+    last_prompt: str(v.last_prompt),
+    updated_at: num(v.updated_at),
+    resume_command: str(v.resume_command) ?? "",
+  };
+}
+
 /** Parse `csx tabs --json` output. Throws when it is not a report. */
 export function parseReport(text: string): Report {
   let v: unknown;
@@ -115,7 +140,8 @@ export function parseReport(text: string): Report {
   }
   const rows = v.rows.map(parseRow).filter((r): r is Row => r !== null);
   const warnings = Array.isArray(v.warnings) ? v.warnings.filter((w): w is string => typeof w === "string") : [];
-  return { rows, warnings };
+  const closed = Array.isArray(v.closed) ? v.closed.map(parseClosed).filter((c): c is ClosedSession => c !== null) : [];
+  return { rows, warnings, closed };
 }
 
 export function oneLine(s: string): string {
@@ -175,4 +201,21 @@ export function rowKeywords(r: Row): string[] {
  * agents on one tty. */
 export function rowKey(r: Row, i: number): string {
   return `${r.ref ?? `${r.terminal}:${r.agent?.pid ?? ""}`}#${i}`;
+}
+
+/** The session title, else its id. */
+export function closedTitle(c: ClosedSession): string {
+  return c.title || c.session_id;
+}
+
+/** The last prompt of a closed session on one line, cut to fit, or null. */
+export function closedPrompt(c: ClosedSession): string | null {
+  const p = c.last_prompt ? oneLine(c.last_prompt) : "";
+  return p ? cut(p, PROMPT_MAX) : null;
+}
+
+/** Search words for a closed session, like `rowKeywords`. */
+export function closedKeywords(c: ClosedSession): string[] {
+  const words = [c.tool, toolName(c.tool), c.cwd, ...c.cwd.split("/"), c.session_id, c.last_prompt ?? ""];
+  return [...new Set(words.flatMap((w) => oneLine(w).split(" ")).filter(Boolean))];
 }
