@@ -48,6 +48,15 @@ pub fn backends(
 /// Ids of the terminal backends, whose refs start with `<id>:`.
 const TERMINAL_IDS: &[&str] = &["ghostty", "iterm2", "terminal", "kitty", "wezterm"];
 
+/// How the warning starts when the process list could not be read.
+const PS_WARNING: &str = "ps: ";
+
+/// True when `report` warns that the process list could not be read. Then no
+/// agent was detected, so `live_sessions` is empty even if agents run.
+pub fn process_list_failed(report: &TabsReport) -> bool {
+    report.warnings.iter().any(|w| w.starts_with(PS_WARNING))
+}
+
 /// True when the terminal filter keeps `id`.
 fn wants(opts: &ListOptions, id: &str) -> bool {
     opts.terminals.is_empty() || opts.terminals.iter().any(|t| t == id)
@@ -99,7 +108,7 @@ pub fn list(
     let found = match ProcessTable::load(ports.cmd) {
         Ok(table) => agent::detect(&table, agents, ctx),
         Err(e) => {
-            warnings.push(format!("ps: {e}"));
+            warnings.push(format!("{PS_WARNING}{e}"));
             Vec::new()
         }
     };

@@ -857,8 +857,9 @@ impl Db {
     }
 
     /// The first and the last user message of a session, by `seq`. Messages
-    /// that are blank or start with `<` once trimmed are skipped: they are
-    /// context the tool injected, such as `<environment_context>`.
+    /// that are blank, or that start with `<` or `# AGENTS.md instructions for`
+    /// once trimmed, are skipped: they are context the tool injected, such as
+    /// `<environment_context>` or the AGENTS.md text Codex adds.
     pub fn user_prompts(&self, session_id: &str) -> Result<(Option<String>, Option<String>)> {
         let pick = |order: &str| -> Result<Option<String>> {
             let sql = format!(
@@ -867,6 +868,7 @@ impl Db {
                  WHERE m.session_id = ?1 AND m.role = 'user'
                    AND trim(t.body, {WHITESPACE}) <> ''
                    AND ltrim(t.body, {WHITESPACE}) NOT LIKE '<%'
+                   AND ltrim(t.body, {WHITESPACE}) NOT LIKE '# AGENTS.md instructions for%'
                  ORDER BY m.seq {order}, m.id {order}
                  LIMIT 1"
             );
@@ -2088,6 +2090,31 @@ mod tests {
         assert_eq!(first.as_deref(), Some("the parser is slow on large files"));
         assert_eq!(first, last);
         assert_eq!(db.user_prompts("ghost").unwrap(), (None, None));
+    }
+
+    #[test]
+    fn user_prompts_skip_injected_agents_md_instructions() {
+        let db = Db::open(":memory:").unwrap();
+        let src = db.upsert_source(&SourceRow::default()).unwrap();
+        let user = |seq: u64, text: &str| {
+            db.insert_message(
+                src,
+                &msg("c1", Tool::Codex, seq, 300, Role::User, None, text),
+            )
+            .unwrap();
+        };
+        user(0, "\n  # AGENTS.md instructions for /w\n\nbe brief");
+        user(1, "add a dark mode");
+        user(2, "# AGENTS.md instructions for /w/sub");
+        let (first, last) = db.user_prompts("c1").unwrap();
+        assert_eq!(first.as_deref(), Some("add a dark mode"));
+        assert_eq!(last.as_deref(), Some("add a dark mode"));
+        // Another heading is an ordinary prompt.
+        user(3, "# Plan for the parser");
+        assert_eq!(
+            db.user_prompts("c1").unwrap().1.as_deref(),
+            Some("# Plan for the parser")
+        );
     }
 
     #[test]

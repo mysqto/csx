@@ -177,6 +177,12 @@ pub fn matches_query(row: &Row, words: &[String]) -> bool {
         parts.extend(a.last_prompt.as_deref());
         parts.extend(a.session_id.as_deref());
     }
+    words_match(&parts, words)
+}
+
+/// True when every word (compared case-insensitively) appears in `parts`
+/// joined by spaces. No words match anything.
+pub fn words_match(parts: &[&str], words: &[String]) -> bool {
     let hay = parts.join(" ").to_lowercase();
     words.iter().all(|w| hay.contains(&w.to_lowercase()))
 }
@@ -274,6 +280,17 @@ mod tests {
         assert!(!matches_query(&r, &words("csx missing")));
         let plain = tab("tmux", 1, 1, "x");
         assert!(!matches_query(&plain, &words("claude")));
+    }
+
+    #[test]
+    fn words_match_needs_every_word_across_the_joined_parts() {
+        assert!(words_match(&["Fix", "the PARSER"], &words("parser fix")));
+        // Words may span two parts, which are joined by a space.
+        assert!(words_match(&["fix", "the"], &words("x t")));
+        assert!(!words_match(&["fix", "the"], &words("fixthe")));
+        assert!(!words_match(&["fix"], &words("fix missing")));
+        assert!(words_match(&[], &[]));
+        assert!(!words_match(&[], &words("a")));
     }
 
     #[test]

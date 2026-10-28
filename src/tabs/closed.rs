@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use super::app::ListOptions;
+use super::app::{process_list_failed, ListOptions};
 use super::render::{cut, one_line};
-use super::{ClosedSession, TabsReport};
+use super::{words_match, ClosedSession, TabsReport};
 use crate::agent::claude::{read_tail, scan_transcript, slug, TranscriptInfo};
 use crate::agent::{resume_line, session_env, RESUMABLE_TOOLS};
 use crate::db::{Db, ResumableSession};
@@ -24,9 +24,9 @@ pub struct ClosedOptions {
 }
 
 /// Closed sessions, newest first: indexed sessions of [`RESUMABLE_TOOLS`]
-/// whose id is not in `live`, whose folder still exists and whose id passes
-/// the tool's check. Titles and prompts are read only for sessions that pass
-/// those checks. `home` decides which config folders are the defaults.
+/// whose id is not in `live`, whose folder is absolute and still exists, and
+/// whose id passes the tool's check. Titles and prompts are read only for
+/// sessions that pass those checks. `home` decides which config folders are the defaults.
 pub fn list_closed(
     db: &Db,
     live: &[String],
@@ -44,6 +44,9 @@ pub fn list_closed(
         let Some(cwd) = s.project_path.as_deref() else {
             continue;
         };
+        if !Path::new(cwd).is_absolute() {
+            continue;
+        }
         let env = session_env(&s.tool, s.config_dir.as_deref(), home);
         let Some(resume_command) = resume_line(&s.tool, &s.session_id, cwd, &env) else {
             continue;
@@ -85,7 +88,11 @@ fn entry(
         tool: s.tool.clone(),
         session_id: s.session_id.clone(),
         title: title
-            .or_else(|| first.map(|p| cut(&one_line(&p), TITLE_CHARS)))
+            .or_else(|| {
+                first
+                    .map(|p| cut(&one_line(&p), TITLE_CHARS))
+                    .filter(|t| !t.is_empty())
+            })
             .or_else(|| s.project_name.clone()),
         cwd: cwd.to_string(),
         last_prompt: tr.last_prompt.or(last),
@@ -117,18 +124,26 @@ fn matches_closed(c: &ClosedSession, words: &[String]) -> bool {
     let mut parts: Vec<&str> = vec![&c.cwd, &c.tool, &c.session_id];
     parts.extend(c.title.as_deref());
     parts.extend(c.last_prompt.as_deref());
-    let hay = parts.join(" ").to_lowercase();
-    words.iter().all(|w| hay.contains(&w.to_lowercase()))
+    words_match(&parts, words)
 }
 
 /// When `opts.closed` asks for closed sessions, list them into
 /// `report.closed`, leaving out the sessions in `report.live_sessions` and
 /// matching `opts.query`. A failure becomes a warning and an empty list, so
-/// the open tabs still show.
+/// the open tabs still show. When the process list could not be read, no
+/// agent was detected and running sessions would look closed, so the list
+/// stays empty and a warning says why.
 pub fn add_closed(report: &mut TabsReport, db: &Db, opts: &ListOptions, home: &Path) {
     let Some(limit) = opts.closed else {
         return;
     };
+    if process_list_failed(report) {
+        report
+            .warnings
+            .push("closed sessions hidden: could not read the process list".into());
+        report.closed = Some(Vec::new());
+        return;
+    }
     let closed_opts = ClosedOptions {
         limit,
         query: opts.query.clone(),
@@ -432,6 +447,67 @@ mod tests {
         assert_eq!(report.closed, Some(vec![]));
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].starts_with("closed sessions: "));
+    }
+
+    #[test]
+    fn skips_relative_project_paths() {
+        let root = tmp("relative");
+        let db = Db::open(":memory:").unwrap();
+        let codex = source(&db, "codex", None);
+        let kept = folder(&root, "kept");
+        // `src` exists relative to the test's working folder, so only the
+        // absolute check can drop it. `-rf` would read as an option.
+        session(&db, codex, Tool::Codex, U1, Some("src"), None, 30);
+        session(&db, codex, Tool::Codex, U2, Some("-rf"), None, 20);
+        session(&db, codex, Tool::Codex, U3, Some(&kept), None, 10);
+        let got = list_closed(&db, &[], &opts(5, &[]), &root).unwrap();
+        assert_eq!(ids(&got), [U3]);
+    }
+
+    #[test]
+    fn a_first_prompt_that_is_only_whitespace_is_not_a_title() {
+        let root = tmp("blank-title");
+        let db = Db::open(":memory:").unwrap();
+        let codex = source(&db, "codex", None);
+        let p = folder(&root, "acme");
+        session(&db, codex, Tool::Codex, U1, Some(&p), Some("acme"), 10);
+        // SQL trim keeps these characters; `one_line` drops them.
+        user(&db, codex, Tool::Codex, U1, 0, "\u{a0}\u{b}\u{2003}");
+        let got = list_closed(&db, &[], &opts(5, &[]), &root).unwrap();
+        assert_eq!(got[0].title.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn add_closed_hides_the_list_when_the_process_list_failed() {
+        let root = tmp("add-ps");
+        let db = Db::open(":memory:").unwrap();
+        let codex = source(&db, "codex", None);
+        let p = folder(&root, "acme");
+        session(&db, codex, Tool::Codex, U1, Some(&p), None, 20);
+        let mut report = TabsReport {
+            warnings: vec!["ps: ps failed: boom".into()],
+            ..TabsReport::default()
+        };
+        let with = ListOptions {
+            closed: Some(5),
+            ..ListOptions::default()
+        };
+        add_closed(&mut report, &db, &with, &root);
+        assert_eq!(report.closed, Some(vec![]));
+        assert_eq!(
+            report.warnings,
+            [
+                "ps: ps failed: boom",
+                "closed sessions hidden: could not read the process list"
+            ]
+        );
+        // Without the closed list asked for, nothing is added.
+        let mut report = TabsReport {
+            warnings: vec!["ps: ps failed: boom".into()],
+            ..TabsReport::default()
+        };
+        add_closed(&mut report, &db, &ListOptions::default(), &root);
+        assert_eq!((report.closed, report.warnings.len()), (None, 1));
     }
 
     #[test]
