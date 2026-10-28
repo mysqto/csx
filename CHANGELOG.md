@@ -19,6 +19,9 @@ All notable changes to csx are documented here. The format follows
   id, title, last prompt, working directory and last activity, and a resume
   command (`cd '<cwd>' && devin -r <id>`).
 - `csx-pick.fish` resumes Devin sessions with `devin -r <id>`.
+- **Raycast extension.** `contrib/raycast/csx-tabs/` adds Search AI Sessions
+  and Search Terminal Tabs to Raycast. Both list rows from `csx tabs --json`,
+  focus the tab on Return, and copy the resume command, session id or folder.
 
 ## [0.2.0] - 2026-10-27
 

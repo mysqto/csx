@@ -112,6 +112,12 @@ one real adapter.
 | `agent/devin.rs`    | Devin agent: session from the pid lock file, details from `sessions.db` (read-only). | —                        |
 | `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/`. | consumes `CommandRunner` |
 
+`contrib/raycast/csx-tabs/` is a separate TypeScript project, the Raycast
+extension. It runs `csx tabs --json` and `csx tabs focus -- <ref>`, so the
+JSON row shape is its contract: if you rename or remove a field in
+`tabs/mod.rs`, update `src/lib/rows.ts` there too. Its checks are
+`npm run build`, `npm test` and `npx eslint src`, run in that folder.
+
 Data flow: **sources → `index::sync` → `Db` (FTS5/trigram + `embeddings`
 BLOBs) → `search` / `rag::retrieve` → `output` / `AskEngine` → CLI, daemon, or
 MCP surface.**

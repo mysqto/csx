@@ -201,7 +201,7 @@ these; they are ANDed together:
 
 ---
 
-## Terminal tabs and Alfred
+## Terminal tabs, Alfred and Raycast
 
 `csx tabs` lists the tabs of your terminal apps. It also shows which tab
 runs an AI coding agent, such as Claude Code, Codex or Devin. You can then jump to
@@ -327,6 +327,23 @@ the session id (or the working directory). Press Option+Return to copy a
 resume command, when the agent supports one. Alfred does not read your shell
 PATH. The workflow looks for `csx` in the usual install folders. If yours is
 elsewhere, set the `csx_path` workflow variable.
+
+### Raycast extension
+
+The CSX Tabs extension for Raycast has two commands. Search AI Sessions lists
+the tabs that run an agent, and Search Terminal Tabs lists every tab. Press
+Return to focus the tab. The Action Panel copies the resume command, the
+session id or the folder. To set a hotkey, open Raycast Settings, then
+Extensions, then CSX Tabs, and record a hotkey for a command.
+
+The extension calls `csx tabs --json`, so install csx first. It looks for csx
+in the same folders as the Alfred workflow, and you can set the path in the
+extension preferences. The source is in `contrib/raycast/csx-tabs/`. To run it
+from a clone, install Node.js, then run this command in that folder:
+
+```sh
+npm install && npm run dev
+```
 
 ## The multi-tool adapter model
 
