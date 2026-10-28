@@ -121,7 +121,7 @@ extension. It runs `csx tabs --json`, `csx tabs --closed --json`, `csx tabs focu
 `csx tabs terminals --json` and `csx tabs open`, so the JSON shape is its contract. `test/fixtures/report.json` there holds one
 report, with `rows`, `warnings` and `closed`, and both `render_json_matches_raycast_fixture` in `tabs/render.rs` and
 the extension tests check it. If you rename or remove a field in
-`tabs/mod.rs` or `tabs/closed.rs`, update the fixture and `src/lib/rows.ts` together. Its checks
+`tabs/mod.rs`, update the fixture, `src/lib/rows.ts` and `src/lib/terminals.ts` (the TS side of the `terminals` JSON) together. Its checks
 are `npm run build`, `npm test`, `npx eslint src test` and
 `npx prettier --check .`, run in that folder.
 

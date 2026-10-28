@@ -36,8 +36,9 @@ All notable changes to csx are documented here. The format follows
   `~/.csx/sync.lock` exists. `csx sync` and `csx serve` update the stamp.
 - **Alfred and Raycast resume closed sessions.** Closed sessions come last in
   the AI sessions list. Return opens one in the saved terminal, or asks for a
-  terminal and saves it. Ctrl+Return picks a terminal for one session. The
-  Alfred workflow gets a "Terminal" setting.
+  terminal and saves it. In Alfred, Ctrl+Return picks a terminal for one
+  session. In Raycast, use Resume in Another Terminal. The Alfred workflow
+  gets a "Terminal" setting.
 
 ## [0.2.0] - 2026-10-27
 

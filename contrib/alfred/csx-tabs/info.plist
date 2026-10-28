@@ -79,7 +79,7 @@
 				<key>modifiers</key>
 				<integer>262144</integer>
 				<key>modifiersubtext</key>
-				<string>Choose a terminal for this session</string>
+				<string></string>
 				<key>vitoclose</key>
 				<false/>
 			</dict>

@@ -242,6 +242,8 @@ csx skips a session in these cases:
 - The folder of the session no longer exists, or is not an absolute path.
 - The folder name has a control character or a backslash. csx cannot type it
   safely.
+- The session has no folder in the index, its id is not valid, or its config
+  folder has a control character or a backslash.
 
 If csx cannot read the process list, it hides the closed list and prints a
 warning.
@@ -272,8 +274,9 @@ shell. Then it brings the terminal to the front.
 - If the config folder of the session is not the default, csx passes it as
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `XDG_DATA_HOME`.
 - Terminal.app opens a new window, because its AppleScript has no "new tab".
-- If Ghostty, iTerm2 or WezTerm is not running, csx starts it. An extra
-  empty tab or window can appear.
+- If Ghostty, iTerm2, WezTerm or Terminal is not running, csx starts it. An
+  extra empty tab or window can appear. Terminal can open its default window
+  as well as the new one.
 - kitty must run, and it needs remote control. See "kitty setup".
 
 ### Supported terminals
@@ -382,7 +385,7 @@ Closed sessions come last in the AI sessions list (keyword `ct`). They need
 csx 0.3.0 or newer.
 
 - Return opens the session in your saved terminal. If you saved none, Alfred
-  shows a list of installed terminals. Pick one. csx saves it after the
+  shows a list of installed terminals. Pick one. The workflow saves it after the
   session opens.
 - Ctrl+Return shows the list for one session. It does not save the choice.
 - Cmd+Return copies the session id. Option+Return copies the resume command.
@@ -391,9 +394,9 @@ To set the terminal yourself, open Alfred Preferences, then Workflows, then
 csx tabs, then Configure Workflow. Change the setting "Terminal". If an open
 fails, Alfred shows the error and saves nothing.
 
-Alfred does not read your shell
-PATH. The workflow looks for `csx` in the usual install folders. If yours is
-elsewhere, set the `csx_path` workflow variable.
+Alfred does not read your shell `PATH`. The workflow looks for `csx` in the
+usual install folders. If yours is elsewhere, set the `csx_path` workflow
+variable.
 
 ### Raycast extension
 
