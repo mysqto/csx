@@ -1294,6 +1294,7 @@ printf 'osascript' >> "$STUB_LOG"; for a in "$@"; do printf ' [%s]' "$a" >> "$ST
         }
     }
 
+    const HINT: &str = "Ctrl+Return to choose another terminal\n";
     const SID: &str = "4a5b6c7d-0000-4000-8000-00000000beef";
     const SAVE: &str = "osascript [-e] [on run argv] [-e] [tell application id \
 \"com.runningwithcrayons.Alfred\" to set configuration \"terminal\" to value (item 1 of argv) \
@@ -1340,7 +1341,7 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
         assert_eq!(out, "");
         assert_eq!(
             log,
-            format!("{SAVE}csx [tabs] [open] [--terminal] [iterm2] [--] [claude-code] [{SID}]\n")
+            format!("csx [tabs] [open] [--terminal] [iterm2] [--] [claude-code] [{SID}]\n{SAVE}")
         );
         let vars = [
             ("csx_kind", "closed_pick"),
@@ -1363,9 +1364,12 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
             ("STUB_FAIL", "the folder \"/gone\" no longer exists"),
         ];
         let (out, log) = sh.run(&["open", SID], &vars);
-        assert_eq!(out, "csx: the folder \"/gone\" no longer exists\n");
+        assert_eq!(
+            out,
+            format!("csx: the folder \"/gone\" no longer exists\n{HINT}")
+        );
         assert!(!log.contains("osascript"), "{log}");
-        // With a picked terminal to save, the choice is still saved once.
+        // A picked terminal is not saved when the open fails.
         let vars = [
             ("csx_tool", "codex"),
             ("csx_terminal", "iterm2"),
@@ -1373,8 +1377,9 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
             ("STUB_FAIL", "boom"),
         ];
         let (out, log) = sh.run(&["open", SID], &vars);
-        assert_eq!(out, "csx: boom\n");
-        assert_eq!(log.matches("osascript").count(), 1, "{log}");
+        assert_eq!(out, format!("csx: boom\n{HINT}"));
+        assert!(!log.contains("osascript"), "{log}");
+        assert!(log.contains("[--terminal] [iterm2]"), "{log}");
     }
 
     #[test]
@@ -1422,14 +1427,14 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
                     "subtitle": "Open in Ghostty and use it from now on",
                     "arg": SID,
                     "valid": true,
-                    "variables": {"csx_terminal": "ghostty", "csx_save": "1"}
+                    "variables": {"csx_terminal": "ghostty", "csx_save": "1", "csx_tool": "codex"}
                 }),
                 serde_json::json!({
                     "title": "Terminal",
                     "subtitle": "Open in Terminal and use it from now on",
                     "arg": SID,
                     "valid": true,
-                    "variables": {"csx_terminal": "terminal", "csx_save": "1"}
+                    "variables": {"csx_terminal": "terminal", "csx_save": "1", "csx_tool": "codex"}
                 }),
             ]
         );
@@ -1444,6 +1449,18 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
         assert_eq!(got[0]["subtitle"], "Open in Ghostty this time");
         assert_eq!(got[0]["variables"]["csx_save"], "0");
         assert_eq!(got[1]["variables"]["csx_terminal"], "terminal");
+        for tool in ["claude-code", "devin"] {
+            let vars = [
+                ("csx_kind", "closed"),
+                ("csx_tool", tool),
+                ("csx_session", SID),
+            ];
+            let got = items(&sh.run(&["pick"], &vars).0);
+            assert!(
+                got.iter().all(|i| i["variables"]["csx_tool"] == tool),
+                "{tool}"
+            );
+        }
     }
 
     #[test]
@@ -1452,6 +1469,7 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
         let vars = |t: &'static str| {
             vec![
                 ("csx_kind", "closed"),
+                ("csx_tool", "codex"),
                 ("csx_session", SID),
                 ("STUB_TERMINALS", t),
             ]
@@ -1473,12 +1491,33 @@ in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
         }
         // No session, or one csx would not have listed: nothing to open.
         for sid in ["", "-rf", "a b", "x\"y"] {
-            let (out, log) = sh.run(&["pick"], &[("csx_kind", "closed"), ("csx_session", sid)]);
+            let vars = [
+                ("csx_kind", "closed"),
+                ("csx_tool", "codex"),
+                ("csx_session", sid),
+            ];
+            let (out, log) = sh.run(&["pick"], &vars);
             let got = items(&out);
             assert_eq!(got[0]["title"], "No session to open", "{sid}");
             assert_eq!(got[0]["valid"], false);
             assert_eq!(log, "", "{sid}");
         }
+        // A tool csx cannot resume, or none: nothing to open.
+        for tool in ["", "gemini", "codex\"", "claude-code x"] {
+            let vars = [
+                ("csx_kind", "closed"),
+                ("csx_tool", tool),
+                ("csx_session", SID),
+            ];
+            let (out, log) = sh.run(&["pick"], &vars);
+            let got = items(&out);
+            assert_eq!(got.len(), 1, "{tool}");
+            assert_eq!(got[0]["title"], "Cannot resume this session", "{tool}");
+            assert_eq!(got[0]["valid"], false);
+            assert_eq!(log, "", "{tool}");
+        }
+        let (out, _) = sh.run(&["pick"], &[("csx_session", SID)]);
+        assert_eq!(items(&out)[0]["title"], "Cannot resume this session");
     }
 
     #[test]
