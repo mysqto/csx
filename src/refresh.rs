@@ -95,6 +95,24 @@ pub fn maybe_refresh(
     Ok(true)
 }
 
+/// Decide and start a refresh for one `tabs` listing; returns the warning to
+/// show, if any. Does nothing unless `closed` is set and both the index folder
+/// and the executable are known. A refresh error is a warning, never a failure.
+pub fn refresh_warning(
+    closed: bool,
+    dir: Option<&Path>,
+    exe: Option<&Path>,
+    now: SystemTime,
+    spawner: &dyn Spawner,
+) -> Option<String> {
+    let (true, Some(dir), Some(exe)) = (closed, dir, exe) else {
+        return None;
+    };
+    maybe_refresh(dir, now, exe, spawner)
+        .err()
+        .map(|e| format!("refresh: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +290,33 @@ mod tests {
         let fake = Fake::default();
         assert!(!run(&d, &fake).unwrap());
         assert!(fake.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn refresh_warning_gates_and_reports() {
+        let d = tmp("warn");
+        let exe = Path::new("/bin/csx");
+        let now = SystemTime::now();
+        let fake = Fake::default();
+        assert_eq!(
+            refresh_warning(false, Some(&d), Some(exe), now, &fake),
+            None
+        );
+        assert_eq!(refresh_warning(true, None, Some(exe), now, &fake), None);
+        assert_eq!(refresh_warning(true, Some(&d), None, now, &fake), None);
+        assert!(fake.calls.borrow().is_empty());
+
+        assert_eq!(refresh_warning(true, Some(&d), Some(exe), now, &fake), None);
+        assert_eq!(fake.calls.borrow().len(), 1);
+
+        release_lock(&d);
+        let bad = Fake {
+            fail: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            refresh_warning(true, Some(&d), Some(exe), now, &bad),
+            Some("refresh: no spawn".to_string())
+        );
     }
 }
