@@ -1,0 +1,28 @@
+# CSX Tabs
+
+Jump to the terminal tab where an AI coding agent runs, or to any terminal tab.
+The extension supports Ghostty, iTerm2, Terminal, kitty, WezTerm and tmux.
+
+## Commands
+
+- Search AI Sessions lists the tabs that run Claude Code, Codex, Devin, Cursor Agent or another AI coding agent. Each row shows the session title, folder, last prompt and whether the agent is busy or idle.
+- Search Terminal Tabs lists every terminal tab.
+
+Press Return to bring the tab to the front. The Action Panel can also copy the command that resumes the session, the session ID or the folder.
+
+## Setup
+
+The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew:
+
+```sh
+brew tap mysqto/csx https://github.com/mysqto/csx
+brew install --cask csx
+```
+
+The extension looks for csx in `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `~/.cargo/bin` and `~/.local/bin`. If you installed csx somewhere else, set its full path in the extension preferences.
+
+## Permissions
+
+csx reads the tab lists through Apple Events. The first time you use a command, macOS asks whether Raycast can control each terminal. Allow it. If you clicked Don't Allow, turn the terminal on again in System Settings > Privacy & Security > Automation > Raycast.
+
+kitty needs remote control. Add `allow_remote_control socket-only` and `listen_on unix:${TMPDIR}/kitty` to `kitty.conf`, then restart kitty.

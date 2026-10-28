@@ -1,0 +1,74 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "csx-tabs",
+  "title": "CSX Tabs",
+  "description": "Jump to the terminal tab where an AI coding agent runs, or to any terminal tab. Works with Ghostty, iTerm2, Terminal, kitty, WezTerm and tmux.",
+  "icon": "extension-icon.png",
+  "author": "mysqto",
+  "categories": [
+    "Developer Tools",
+    "Productivity"
+  ],
+  "keywords": [
+    "terminal",
+    "tabs",
+    "claude",
+    "codex",
+    "ghostty",
+    "iterm",
+    "kitty",
+    "wezterm",
+    "tmux"
+  ],
+  "license": "MIT",
+  "platforms": [
+    "macOS"
+  ],
+  "commands": [
+    {
+      "name": "search-ai-sessions",
+      "title": "Search AI Sessions",
+      "subtitle": "csx",
+      "description": "List the terminal tabs that run an AI coding agent, such as Claude Code, Codex or Devin, and focus one.",
+      "mode": "view"
+    },
+    {
+      "name": "search-terminal-tabs",
+      "title": "Search Terminal Tabs",
+      "subtitle": "csx",
+      "description": "List every terminal tab and focus one.",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "csxPath",
+      "title": "csx Path",
+      "description": "Full path to the csx binary. Leave empty to look in the Homebrew, MacPorts and Cargo folders.",
+      "type": "textfield",
+      "required": false,
+      "placeholder": "/opt/homebrew/bin/csx"
+    }
+  ],
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint",
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "echo \"\\n\\nIt seems like you are trying to publish the Raycast extension to npm.\\n\\nIf you did intend to publish it to npm, remove the \\`prepublishOnly\\` script and rerun \\`npm publish\\` again.\\nIf you wanted to publish it to the Raycast Store instead, use \\`npm run publish\\` instead.\\n\\n\" && exit 1",
+    "publish": "npx @raycast/api@latest publish"
+  },
+  "dependencies": {
+    "@raycast/api": "^2.9.0",
+    "@raycast/utils": "^2.3.3"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3"
+  }
+}
