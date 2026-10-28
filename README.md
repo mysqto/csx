@@ -215,23 +215,66 @@ csx tabs --terminal ghostty   # only one terminal (repeat the flag for more)
 csx tabs fix login            # only rows that match every word
 csx tabs --json               # {"rows": [...], "warnings": [...]}
 csx tabs --alfred             # Alfred script filter JSON
+csx tabs --closed             # also list closed sessions you can resume
+csx tabs --closed --closed-limit 20  # list at most 20 closed sessions
 csx tabs focus <ref>          # bring one tab to the front
 csx tabs terminals --json     # installed terminals that `open` can use
 csx tabs open --terminal ghostty codex <session id>  # resume in a new tab
 csx alfred install            # install or update the Alfred workflow
 ```
 
-`csx tabs open` resumes an indexed Claude Code, Codex or Devin session. You
-give the terminal, the tool and the session id. csx takes the folder from its
-index and builds the resume command itself. It opens a new tab in that
-folder, types the command, and brings the terminal to the front. If an agent
-already runs the session, csx focuses that tab and prints `focused <ref>`.
-Terminal.app opens a new window, because its AppleScript has no "new tab".
-
 `--json` prints one object. `rows` holds the tabs. `warnings` holds short
 messages about terminals that could not be read. `--alfred` and `--json`
 cannot be used together. Each row has a `ref`. Pass it to `csx tabs focus`.
 A row can have no `ref`. You cannot focus it, but you can still copy from it.
+
+### Closed sessions
+
+A closed session is an indexed Claude Code, Codex or Devin session that no
+tab runs now. Add `--closed` to list them after the open rows. With `--json`,
+they are in a `closed` array. Each entry has the tool, session id, title,
+folder, last prompt, last activity and resume command. The default limit is
+50. Use `--closed-limit <N>` to change it.
+
+csx skips a session in these cases:
+
+- An agent still runs the session.
+- The folder of the session no longer exists, or is not an absolute path.
+- The folder name has a control character or a backslash. csx cannot type it
+  safely.
+
+If csx cannot read the process list, it hides the closed list and prints a
+warning.
+
+The list comes from the index. If you add `--closed`, csx checks the file
+`~/.csx/last-sync`, next to the index. If it is older than 60 seconds, csx
+starts `csx sync` in the background. It does not start a second sync while a
+`~/.csx/sync.lock` file is younger than 5 minutes. `csx sync` and `csx serve`
+update the stamp too. The list you see now can be a little old. The next
+call shows the new sessions.
+
+### Resume a closed session
+
+```sh
+csx tabs terminals --json                     # terminals you can open a session in
+csx tabs open --terminal ghostty codex <session id>
+```
+
+`csx tabs terminals` lists the installed terminals. `csx tabs open` needs a
+terminal id from that list, the tool and the session id. csx takes the
+folder from its index and builds the resume command itself. It opens a new
+tab, goes to the folder with `cd`, and runs the resume command in your login
+shell. Then it brings the terminal to the front.
+
+- If an agent already runs the session in a tab, csx focuses that tab and
+  prints `focused <ref>`.
+- If the agent runs outside a tab, csx stops with an error.
+- If the config folder of the session is not the default, csx passes it as
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `XDG_DATA_HOME`.
+- Terminal.app opens a new window, because its AppleScript has no "new tab".
+- If Ghostty, iTerm2 or WezTerm is not running, csx starts it. An extra
+  empty tab or window can appear.
+- kitty must run, and it needs remote control. See "kitty setup".
 
 ### Supported terminals
 
@@ -333,7 +376,22 @@ that character.
 
 In the result list, press Return to focus the tab. Press Cmd+Return to copy
 the session id (or the working directory). Press Option+Return to copy a
-resume command, when the agent supports one. Alfred does not read your shell
+resume command, when the agent supports one.
+
+Closed sessions come last in the AI sessions list (keyword `ct`). They need
+csx 0.3.0 or newer.
+
+- Return opens the session in your saved terminal. If you saved none, Alfred
+  shows a list of installed terminals. Pick one. csx saves it after the
+  session opens.
+- Ctrl+Return shows the list for one session. It does not save the choice.
+- Cmd+Return copies the session id. Option+Return copies the resume command.
+
+To set the terminal yourself, open Alfred Preferences, then Workflows, then
+csx tabs, then Configure Workflow. Change the setting "Terminal". If an open
+fails, Alfred shows the error and saves nothing.
+
+Alfred does not read your shell
 PATH. The workflow looks for `csx` in the usual install folders. If yours is
 elsewhere, set the `csx_path` workflow variable.
 
@@ -344,6 +402,12 @@ the tabs that run an agent, and Search Terminal Tabs lists every tab. Press
 Return to focus the tab. The Action Panel copies the resume command, the
 session id or the folder. To set a hotkey, open Raycast Settings, then
 Extensions, then CSX Tabs, and record a hotkey for a command.
+
+Search AI Sessions also lists closed sessions in a Closed Sessions section. They
+need csx 0.3.0 or newer. Press Return to resume one in a new tab. The first
+time, the extension asks for a terminal and remembers it after the session
+opens. Resume in Another Terminal and Change Default Terminal are in the
+Action Panel. The extension README has the details.
 
 The extension calls `csx tabs --json`, so install csx first. It looks for csx
 in the same folders as the Alfred workflow, and you can set the path in the

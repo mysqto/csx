@@ -22,6 +22,22 @@ All notable changes to csx are documented here. The format follows
 - **Raycast extension.** `contrib/raycast/csx-tabs/` adds Search AI Sessions
   and Search Terminal Tabs to Raycast. Both list rows from `csx tabs --json`,
   focus the tab on Return, and copy the resume command, session id or folder.
+- **Resume closed sessions.** `csx tabs --closed [--closed-limit N]` lists
+  closed Claude Code, Codex and Devin sessions from the index after the open
+  rows, and `--json` adds a `closed` array. csx skips a session that runs, has
+  a missing or unsafe folder, or has a folder path that is not absolute. If
+  the process list is unreadable, csx hides the list and warns.
+- **`csx tabs terminals [--json]`** lists the installed terminals.
+  **`csx tabs open --terminal <id> <tool> <session id>`** opens a new tab in
+  the session folder and runs the resume command. If the session already runs
+  in a tab, csx focuses it. Terminal.app opens a new window.
+- **Background index refresh.** With `--closed`, csx starts `csx sync` in the
+  background if `~/.csx/last-sync` is older than 60 seconds and no fresh
+  `~/.csx/sync.lock` exists. `csx sync` and `csx serve` update the stamp.
+- **Alfred and Raycast resume closed sessions.** Closed sessions come last in
+  the AI sessions list. Return opens one in the saved terminal, or asks for a
+  terminal and saves it. Ctrl+Return picks a terminal for one session. The
+  Alfred workflow gets a "Terminal" setting.
 
 ## [0.2.0] - 2026-10-27
 

@@ -117,11 +117,11 @@ one real adapter.
 | `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/` (`info.plist`, `csx.sh`, and `open.sh`, the terminal picker and `csx tabs open` step). Keeps `prefs.plist`, where Alfred stores the user's keywords and saved terminal. Its tests run `open.sh` with stub `csx` and `osascript` commands. | consumes `CommandRunner` |
 
 `contrib/raycast/csx-tabs/` is a separate TypeScript project, the Raycast
-extension. It runs `csx tabs --json` and `csx tabs focus -- <ref>`, so the
-JSON row shape is its contract. `test/fixtures/report.json` there holds one
-report, and both `render_json_matches_raycast_fixture` in `tabs/render.rs` and
+extension. It runs `csx tabs --json`, `csx tabs --closed --json`, `csx tabs focus -- <ref>`,
+`csx tabs terminals --json` and `csx tabs open`, so the JSON shape is its contract. `test/fixtures/report.json` there holds one
+report, with `rows`, `warnings` and `closed`, and both `render_json_matches_raycast_fixture` in `tabs/render.rs` and
 the extension tests check it. If you rename or remove a field in
-`tabs/mod.rs`, update the fixture and `src/lib/rows.ts` together. Its checks
+`tabs/mod.rs` or `tabs/closed.rs`, update the fixture and `src/lib/rows.ts` together. Its checks
 are `npm run build`, `npm test`, `npx eslint src test` and
 `npx prettier --check .`, run in that folder.
 
