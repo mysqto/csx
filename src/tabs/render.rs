@@ -1,6 +1,6 @@
 //! Rendering of tab rows: a human table, JSON, and Alfred script filter JSON.
 
-use super::{AgentStatus, Row, TabsReport};
+use super::{AgentStatus, ClosedSession, Row, TabsReport};
 use serde::Serialize;
 
 /// Longest title in the human table, in characters.
@@ -9,12 +9,12 @@ const HUMAN_TITLE_MAX: usize = 60;
 const PROMPT_MAX: usize = 80;
 
 /// Collapse whitespace (newlines included) to single spaces and trim.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Cut `s` to at most `max` characters, ending with `…` when cut.
-fn cut(s: &str, max: usize) -> String {
+pub(crate) fn cut(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -41,8 +41,8 @@ fn cwd(r: &Row) -> Option<&str> {
 }
 
 /// Left-aligned columns padded to the widest cell, two spaces apart.
-fn table(rows: &[[String; 5]]) -> String {
-    let mut widths = [0usize; 5];
+fn table<const N: usize>(rows: &[[String; N]]) -> String {
+    let mut widths = [0usize; N];
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
@@ -61,7 +61,17 @@ fn table(rows: &[[String; 5]]) -> String {
     out
 }
 
-/// One line per row under a header, warnings first.
+/// `s`, or `-` when it is empty.
+fn dash(s: &str) -> String {
+    if s.is_empty() {
+        "-".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// One line per row under a header, warnings first, then the closed
+/// sessions when they were listed.
 pub fn render_human(report: &TabsReport) -> String {
     let mut out: String = report
         .warnings
@@ -70,17 +80,20 @@ pub fn render_human(report: &TabsReport) -> String {
         .collect();
     if report.rows.is_empty() {
         out.push_str("no matching tabs\n");
-        return out;
+    } else {
+        out.push_str(&rows_table(&report.rows));
     }
-    let dash = |s: &str| {
-        if s.is_empty() {
-            "-".to_string()
-        } else {
-            s.to_string()
-        }
-    };
+    if let Some(closed) = &report.closed {
+        out.push_str("closed sessions\n");
+        out.push_str(&closed_table(closed));
+    }
+    out
+}
+
+/// The tab rows under a header.
+fn rows_table(report_rows: &[Row]) -> String {
     let mut rows = vec![["TERMINAL", "TITLE", "CWD", "AGENT", "REF"].map(String::from)];
-    for r in &report.rows {
+    for r in report_rows {
         let agent = r.agent.as_ref().map_or(String::new(), |a| match a.status {
             AgentStatus::Busy => format!("{} busy", a.tool),
             AgentStatus::Idle => format!("{} idle", a.tool),
@@ -94,11 +107,29 @@ pub fn render_human(report: &TabsReport) -> String {
             dash(r.ref_.as_deref().unwrap_or("")),
         ]);
     }
-    out.push_str(&table(&rows));
-    out
+    table(&rows)
 }
 
-/// `{"rows":[...],"warnings":[...]}`.
+/// One line per closed session: tool, title and folder.
+fn closed_table(closed: &[ClosedSession]) -> String {
+    if closed.is_empty() {
+        return "no matching closed sessions\n".into();
+    }
+    let rows: Vec<[String; 3]> = closed
+        .iter()
+        .map(|c| {
+            let title = c.title.as_deref().map(one_line).unwrap_or_default();
+            [
+                c.tool.clone(),
+                dash(&cut(&title, HUMAN_TITLE_MAX)),
+                c.cwd.clone(),
+            ]
+        })
+        .collect();
+    table(&rows)
+}
+
+/// `{"rows":[...],"warnings":[...]}`, plus `"closed":[...]` when listed.
 pub fn render_json(report: &TabsReport) -> String {
     serde_json::to_string_pretty(report).unwrap_or_default()
 }
@@ -247,7 +278,7 @@ pub fn render_alfred_with_home(report: &TabsReport, home: Option<&str>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tabs::{AgentInfo, AgentStatus, Row, Tab};
+    use crate::tabs::{AgentInfo, AgentStatus, ClosedSession, Row, Tab};
     use serde_json::Value;
 
     fn row(terminal: &str, ref_: Option<&str>, title: &str, cwd: Option<&str>) -> Row {
@@ -266,7 +297,64 @@ mod tests {
         TabsReport {
             rows,
             warnings: warnings.iter().map(|w| w.to_string()).collect(),
+            ..TabsReport::default()
         }
+    }
+
+    fn closed(tool: &str, id: &str, title: Option<&str>, cwd: &str) -> ClosedSession {
+        ClosedSession {
+            tool: tool.into(),
+            session_id: id.into(),
+            title: title.map(str::to_string),
+            cwd: cwd.into(),
+            ..ClosedSession::default()
+        }
+    }
+
+    #[test]
+    fn render_human_lists_closed_sessions_after_the_rows() {
+        let mut r = report(
+            vec![row("iterm2", Some("iterm2:a"), "zsh", Some("/x"))],
+            &[],
+        );
+        r.closed = Some(vec![
+            closed(
+                "claude-code",
+                "u1",
+                Some("Fix\nlogin"),
+                "/Users/me/work/acme",
+            ),
+            closed("devin", "swift-otter", None, "/srv/app"),
+        ]);
+        let out = render_human(&r);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines[1].starts_with("iterm2"));
+        assert_eq!(lines[2], "closed sessions");
+        assert_eq!(lines[3], "claude-code  Fix login  /Users/me/work/acme");
+        assert_eq!(lines[4], "devin        -          /srv/app");
+
+        // No rows: the closed list still prints.
+        let mut r = report(vec![], &[]);
+        r.closed = Some(vec![closed("codex", "u2", Some("t"), "/w")]);
+        assert_eq!(
+            render_human(&r),
+            "no matching tabs\nclosed sessions\ncodex  t  /w\n"
+        );
+        r.closed = Some(vec![]);
+        assert_eq!(
+            render_human(&r),
+            "no matching tabs\nclosed sessions\nno matching closed sessions\n"
+        );
+    }
+
+    #[test]
+    fn render_alfred_ignores_closed_sessions() {
+        let mut r = report(vec![], &[]);
+        r.closed = Some(vec![closed("codex", "u2", Some("t"), "/w")]);
+        let items = alfred(&r);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["title"], "No matching tabs");
     }
 
     fn alfred(r: &TabsReport) -> Vec<Value> {
@@ -477,6 +565,17 @@ mod tests {
         assert_eq!(v["warnings"], serde_json::json!(["w"]));
         let empty: Value = serde_json::from_str(&render_json(&TabsReport::default())).unwrap();
         assert_eq!(empty, serde_json::json!({"rows": [], "warnings": []}));
+        // Live session ids stay out of the JSON; `closed` shows only when listed.
+        let live = TabsReport {
+            live_sessions: vec!["s1".into()],
+            closed: Some(vec![]),
+            ..TabsReport::default()
+        };
+        let v: Value = serde_json::from_str(&render_json(&live)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"rows": [], "warnings": [], "closed": []})
+        );
     }
 
     /// The Raycast extension parses this same file, so a renamed or removed
@@ -527,11 +626,22 @@ mod tests {
             }),
             ..Tab::default()
         };
-        let got: Value = serde_json::from_str(&render_json(&report(
+        let mut r = report(
             vec![claude, plain, tabless],
             &["kitty: remote control is off"],
-        )))
-        .unwrap();
+        );
+        r.closed = Some(vec![ClosedSession {
+            tool: "claude-code".into(),
+            session_id: "4a5b6c7d-0000-4000-8000-00000000beef".into(),
+            title: s("Add dark mode"),
+            cwd: "/Users/me/work/acme-web".into(),
+            last_prompt: s("make the toggle persist"),
+            updated_at: Some(1_793_150_000_000),
+            resume_command:
+                "cd '/Users/me/work/acme-web' && claude --resume 4a5b6c7d-0000-4000-8000-00000000beef"
+                    .into(),
+        }]);
+        let got: Value = serde_json::from_str(&render_json(&r)).unwrap();
         let want: Value = serde_json::from_str(include_str!(
             "../../contrib/raycast/csx-tabs/test/fixtures/report.json"
         ))

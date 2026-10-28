@@ -814,6 +814,55 @@ impl Db {
         Ok(out)
     }
 
+    /// Sessions of `tools` with their source's config folder, newest
+    /// `last_ts` first (sessions without one last).
+    pub fn resumable_sessions(&self, tools: &[&str]) -> Result<Vec<ResumableSession>> {
+        let marks = vec!["?"; tools.len()].join(", ");
+        let sql = format!("{RESUMABLE_SELECT} WHERE s.tool IN ({marks}) {RESUMABLE_ORDER}");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(tools), resumable_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// One session of `tool` by id, with its source's config folder.
+    pub fn resumable_session(
+        &self,
+        tool: &str,
+        session_id: &str,
+    ) -> Result<Option<ResumableSession>> {
+        let sql = format!("{RESUMABLE_SELECT} WHERE s.tool = ?1 AND s.session_id = ?2");
+        Ok(self
+            .conn
+            .query_row(&sql, params![tool, session_id], resumable_row)
+            .optional()?)
+    }
+
+    /// The first and the last user message of a session, by `seq`. Messages
+    /// that are blank or start with `<` once trimmed are skipped: they are
+    /// context the tool injected, such as `<environment_context>`.
+    pub fn user_prompts(&self, session_id: &str) -> Result<(Option<String>, Option<String>)> {
+        let pick = |order: &str| -> Result<Option<String>> {
+            let sql = format!(
+                "SELECT t.body FROM messages m
+                 JOIN messages_text t ON t.id = m.id
+                 WHERE m.session_id = ?1 AND m.role = 'user'
+                   AND trim(t.body, {WHITESPACE}) <> ''
+                   AND ltrim(t.body, {WHITESPACE}) NOT LIKE '<%'
+                 ORDER BY m.seq {order}, m.id {order}
+                 LIMIT 1"
+            );
+            Ok(self
+                .conn
+                .query_row(&sql, [session_id], |r| r.get(0))
+                .optional()?)
+        };
+        Ok((pick("ASC")?, pick("DESC")?))
+    }
+
     /// The active account per tool: for each tool, the source owning the session
     /// with the most recent `last_ts`. Powers the `current` command.
     pub fn current_accounts(&self) -> Result<Vec<CurrentAccount>> {
@@ -840,6 +889,47 @@ impl Db {
         }
         Ok(out)
     }
+}
+
+/// A session csx may offer to resume, as the index knows it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResumableSession {
+    /// Session id.
+    pub session_id: String,
+    /// Tool id, for example `claude-code`.
+    pub tool: String,
+    /// The folder the session ran in.
+    pub project_path: Option<String>,
+    /// Display name of the project.
+    pub project_name: Option<String>,
+    /// Last activity, unix seconds.
+    pub last_ts: Option<i64>,
+    /// Config folder of the session's source.
+    pub config_dir: Option<String>,
+}
+
+/// The columns of a [`ResumableSession`], for a `WHERE` to follow.
+const RESUMABLE_SELECT: &str = "SELECT s.session_id, s.tool, s.project_path, s.project_name,
+            s.last_ts, src.config_dir
+     FROM sessions s
+     LEFT JOIN sources src ON src.id = s.source_id";
+
+/// Newest first, then by id so the order is stable.
+const RESUMABLE_ORDER: &str = "ORDER BY s.last_ts DESC, s.session_id";
+
+/// The characters SQL `trim` removes before a prompt is checked: space, tab,
+/// newline and carriage return.
+const WHITESPACE: &str = "' ' || char(9, 10, 13)";
+
+fn resumable_row(r: &rusqlite::Row) -> rusqlite::Result<ResumableSession> {
+    Ok(ResumableSession {
+        session_id: r.get(0)?,
+        tool: r.get(1)?,
+        project_path: r.get(2)?,
+        project_name: r.get(3)?,
+        last_ts: r.get(4)?,
+        config_dir: r.get(5)?,
+    })
 }
 
 /// Build a [`SourceRow`] from an [`Account`] plus tool/config context. A small
@@ -1889,6 +1979,143 @@ mod tests {
         );
         assert_eq!(db.config_dirs("codex").unwrap(), vec!["/c/.codex"]);
         assert!(db.config_dirs("none").unwrap().is_empty());
+    }
+
+    #[test]
+    fn resumable_sessions_order_and_config_dir() {
+        let (db, src_a, src_b) = fixture();
+        let src_d = db
+            .upsert_source(&SourceRow {
+                tool: Some("devin".into()),
+                config_dir: Some("/home/dev/.local/share/devin/cli".into()),
+                ..SourceRow::default()
+            })
+            .unwrap();
+        db.upsert_session(
+            src_d,
+            &meta("swift-otter", Tool::Devin, None, None, None, None, 50, 300),
+            0,
+            None,
+        )
+        .unwrap();
+        // A session of a tool that is not asked for, and one with no source.
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (session_id, source_id, tool, project_path, last_ts)
+                 VALUES ('g1', 99, 'gemini', '/proj/g', 999), ('n1', 99, 'codex', NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        let rows = db
+            .resumable_sessions(&["claude-code", "codex", "devin"])
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(ids, ["s2", "swift-otter", "s1", "n1"]);
+        assert_eq!(
+            rows[0],
+            ResumableSession {
+                session_id: "s2".into(),
+                tool: "codex".into(),
+                project_path: Some("/proj/y".into()),
+                project_name: Some("projy".into()),
+                last_ts: Some(400),
+                config_dir: Some("/home/dev/.codex".into()),
+            }
+        );
+        assert_eq!(rows[1].project_path, None);
+        assert_eq!(
+            rows[1].config_dir.as_deref(),
+            Some("/home/dev/.local/share/devin/cli")
+        );
+        assert_eq!(rows[2].config_dir.as_deref(), Some("/home/dev/.claude"));
+        assert_eq!(
+            (rows[3].last_ts, rows[3].config_dir.as_deref()),
+            (None, None)
+        );
+        let only: Vec<String> = db
+            .resumable_sessions(&["claude-code"])
+            .unwrap()
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
+        assert_eq!(only, ["s1"]);
+        assert!(db.resumable_sessions(&[]).unwrap().is_empty());
+
+        assert_eq!(
+            db.resumable_session("codex", "s2").unwrap(),
+            Some(rows[0].clone())
+        );
+        assert_eq!(db.resumable_session("claude-code", "s2").unwrap(), None);
+        assert_eq!(db.resumable_session("codex", "ghost").unwrap(), None);
+        let _ = (src_a, src_b);
+    }
+
+    #[test]
+    fn user_prompts_first_last_skips_injected() {
+        let (db, src_a, _) = fixture();
+        let user = |seq: u64, text: &str| {
+            db.insert_message(
+                src_a,
+                &msg("s1", Tool::ClaudeCode, seq, 300, Role::User, None, text),
+            )
+            .unwrap();
+        };
+        // Out of order on purpose: `seq` decides first and last.
+        user(9, "  <environment_context>cwd</environment_context>");
+        user(7, "now run the tests");
+        user(8, "   ");
+        user(5, "<system-reminder>x</system-reminder>");
+        let (first, last) = db.user_prompts("s1").unwrap();
+        assert_eq!(first.as_deref(), Some("how do I fix the parser bug"));
+        assert_eq!(last.as_deref(), Some("now run the tests"));
+        // s2 has one user message: it is both first and last.
+        let (first, last) = db.user_prompts("s2").unwrap();
+        assert_eq!(first.as_deref(), Some("the parser is slow on large files"));
+        assert_eq!(first, last);
+        assert_eq!(db.user_prompts("ghost").unwrap(), (None, None));
+    }
+
+    #[test]
+    fn resumable_helpers_report_sql_errors() {
+        assert!(db_without("sessions")
+            .resumable_sessions(&["codex"])
+            .is_err());
+        assert!(db_without("sessions")
+            .resumable_session("codex", "s1")
+            .is_err());
+        assert!(db_without("messages").user_prompts("s1").is_err());
+        // A row whose non-Option column is NULL fails in the row closure.
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (session_id, tool, last_ts) VALUES ('s1', 'codex', 'x')",
+                [],
+            )
+            .unwrap();
+        assert!(db.resumable_sessions(&["codex"]).is_err());
+        assert!(db.resumable_session("codex", "s1").is_err());
+        // A NULL id or a blob in a text column fails its own column read.
+        for sql in [
+            "INSERT INTO sessions (session_id, tool) VALUES (NULL, 'codex')",
+            "INSERT INTO sessions (session_id, tool, project_path) VALUES ('s1', 'codex', X'00')",
+            "INSERT INTO sessions (session_id, tool, project_name) VALUES ('s1', 'codex', X'00')",
+            "INSERT INTO sources (id, config_dir) VALUES (1, X'00');
+             INSERT INTO sessions (session_id, source_id, tool) VALUES ('s1', 1, 'codex')",
+        ] {
+            let db = Db::open(":memory:").unwrap();
+            db.conn().execute_batch(sql).unwrap();
+            assert!(db.resumable_sessions(&["codex"]).is_err(), "{sql}");
+        }
+        // A last message whose body is a blob fails the second prompt query.
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO messages (id, session_id, seq, role) VALUES
+                    (1, 's1', 0, 'user'), (2, 's1', 1, 'user');
+                 INSERT INTO messages_text (id, body) VALUES (1, 'hi'), (2, X'4142');",
+            )
+            .unwrap();
+        assert!(db.user_prompts("s1").is_err());
     }
 
     #[test]

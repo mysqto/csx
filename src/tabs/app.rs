@@ -21,6 +21,8 @@ pub struct ListOptions {
     pub terminals: Vec<String>,
     /// Query words; every word must match a row.
     pub query: Vec<String>,
+    /// List up to this many closed sessions; `None` lists none.
+    pub closed: Option<usize>,
 }
 
 /// Every supported terminal backend: ghostty, iterm2, terminal, kitty, wezterm.
@@ -101,6 +103,7 @@ pub fn list(
             Vec::new()
         }
     };
+    let live_sessions = found.iter().filter_map(|a| a.session_id.clone()).collect();
     let left = attach_by_tty(&mut rows, found);
     let left = attach_ghostty_by_title(&mut rows, left);
     rows.extend(left.into_iter().map(agent_row));
@@ -112,6 +115,8 @@ pub fn list(
     TabsReport {
         rows: agents_first(rows),
         warnings,
+        closed: None,
+        live_sessions,
     }
 }
 
@@ -474,6 +479,32 @@ mod tests {
         let r = run_list(&os, mk(), infos(), &only("ghostty"));
         assert!(r.rows.is_empty());
         assert_eq!(r.warnings, ["ghostty: boom"]);
+    }
+
+    #[test]
+    fn live_sessions_include_filtered_rows() {
+        let l = log();
+        let ps = [ps_line(10, "ttys001"), ps_line(11, "ttys002")].concat();
+        let os = FakeOs::new(&l).answer("ps -axo", &ps);
+        let it = FakeBackend::new("iterm2", &l).tabs(vec![with_tty(
+            tab("iterm2", "iterm2:a", "s", 1, 1),
+            "ttys001",
+        )]);
+        let mut hidden = agent(10, None, None);
+        hidden.session_id = Some("on-iterm".into());
+        let o = ListOptions {
+            terminals: vec!["kitty".into()],
+            ..opts()
+        };
+        let r = run_list(
+            &os,
+            vec![it.boxed()],
+            vec![hidden, agent(11, None, None)],
+            &o,
+        );
+        assert!(r.rows.is_empty());
+        assert_eq!(r.live_sessions, ["on-iterm"]);
+        assert_eq!(r.closed, None);
     }
 
     #[test]

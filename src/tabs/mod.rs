@@ -2,6 +2,7 @@
 //! OS ports every backend consumes, and row filtering/sorting.
 
 pub mod app;
+pub mod closed;
 pub mod ghostty;
 pub mod iterm2;
 pub mod kitty;
@@ -81,6 +82,25 @@ pub struct Tab {
 /// agent's tty and cwd copied in, and `ref_` set to `tty:<tty>` or `None`.
 pub type Row = Tab;
 
+/// An indexed session that no detected agent runs, and how to resume it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct ClosedSession {
+    /// Tool id: `claude-code`, `codex` or `devin`.
+    pub tool: String,
+    /// Session id.
+    pub session_id: String,
+    /// Session title, else the first user prompt, else the project name.
+    pub title: Option<String>,
+    /// The folder the session ran in.
+    pub cwd: String,
+    /// Last user prompt, when known.
+    pub last_prompt: Option<String>,
+    /// Last activity time in unix milliseconds.
+    pub updated_at: Option<i64>,
+    /// `cd '<cwd>' && <command>`, which resumes the session from any folder.
+    pub resume_command: String,
+}
+
 /// The result of listing tabs.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct TabsReport {
@@ -88,6 +108,12 @@ pub struct TabsReport {
     pub rows: Vec<Row>,
     /// Non-fatal problems met while listing.
     pub warnings: Vec<String>,
+    /// Closed sessions, newest first; `None` when they were not asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Vec<ClosedSession>>,
+    /// Session ids of every detected agent, before any filter.
+    #[serde(skip)]
+    pub live_sessions: Vec<String>,
 }
 
 /// Port: run a JXA (JavaScript for Automation) script.

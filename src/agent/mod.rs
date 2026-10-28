@@ -5,7 +5,7 @@ pub mod codex;
 pub mod devin;
 pub mod generic;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::tabs::process::{Process, ProcessTable};
 use crate::tabs::AgentInfo;
@@ -24,6 +24,64 @@ pub(crate) fn is_uuid(s: &str) -> bool {
 /// Quote `s` for a POSIX shell inside single quotes.
 pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The tools whose sessions csx can resume from the index.
+pub const RESUMABLE_TOOLS: &[&str] = &["claude-code", "codex", "devin"];
+
+/// The command that resumes session `session_id` of `tool`, or `None` for a
+/// tool csx cannot resume or an id that fails the tool's id check (UUIDs for
+/// Claude Code and Codex, session names for Devin).
+pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
+    match tool {
+        "claude-code" if is_uuid(session_id) => Some(format!("claude --resume {session_id}")),
+        "codex" if is_uuid(session_id) => Some(format!("codex resume {session_id}")),
+        "devin" if devin::is_session_name(session_id) => Some(format!("devin -r {session_id}")),
+        _ => None,
+    }
+}
+
+/// `cd '<cwd>' && [NAME='<value>' ...]<resume command>`: a line that resumes
+/// the session from any folder. `None` when [`resume_command`] is `None`.
+pub fn resume_line(
+    tool: &str,
+    session_id: &str,
+    cwd: &str,
+    env: &[(&str, String)],
+) -> Option<String> {
+    let command = resume_command(tool, session_id)?;
+    let vars: String = env
+        .iter()
+        .map(|(name, value)| format!("{name}={} ", shell_quote(value)))
+        .collect();
+    Some(format!("cd {} && {vars}{command}", shell_quote(cwd)))
+}
+
+/// The variable that points `tool` at its config folder `config_dir`, when
+/// that folder is not the tool's default under `home`: `CLAUDE_CONFIG_DIR`,
+/// `CODEX_HOME`, or `XDG_DATA_HOME` (the folder above `devin/cli`) for Devin.
+/// Empty for the default folder, no folder, an unknown tool, or a Devin folder
+/// that does not end in `devin/cli`.
+pub fn session_env(
+    tool: &str,
+    config_dir: Option<&str>,
+    home: &Path,
+) -> Vec<(&'static str, String)> {
+    let Some(dir) = config_dir.filter(|d| !d.is_empty()).map(Path::new) else {
+        return Vec::new();
+    };
+    let var = match tool {
+        "claude-code" if dir != home.join(".claude") => Some(("CLAUDE_CONFIG_DIR", dir)),
+        "codex" if dir != home.join(".codex") => Some(("CODEX_HOME", dir)),
+        "devin" if dir != home.join(".local/share/devin/cli") && dir.ends_with("devin/cli") => dir
+            .parent()
+            .and_then(Path::parent)
+            .map(|d| ("XDG_DATA_HOME", d)),
+        _ => None,
+    };
+    var.map(|(name, d)| (name, d.to_string_lossy().into_owned()))
+        .into_iter()
+        .collect()
 }
 
 /// Where agents look for session data, and the current time.
@@ -167,6 +225,79 @@ mod tests {
             vec![("claude-code", 40), ("claude-code", 60), ("codex", 70)]
         );
         assert_eq!(got[0].tty.as_deref(), Some("ttys1"));
+    }
+
+    const U: &str = "0f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f";
+
+    #[test]
+    fn resume_command_per_tool() {
+        assert_eq!(
+            resume_command("claude-code", U),
+            Some(format!("claude --resume {U}"))
+        );
+        assert_eq!(
+            resume_command("codex", U),
+            Some(format!("codex resume {U}"))
+        );
+        assert_eq!(
+            resume_command("devin", "swamp-movie").as_deref(),
+            Some("devin -r swamp-movie")
+        );
+        assert_eq!(resume_command("devin", "Bad Id"), None);
+        assert_eq!(resume_command("claude-code", "x;rm"), None);
+        assert_eq!(resume_command("codex", "swamp-movie"), None);
+        assert_eq!(resume_command("gemini", U), None);
+        assert_eq!(RESUMABLE_TOOLS, ["claude-code", "codex", "devin"]);
+    }
+
+    #[test]
+    fn resume_line_quotes_folder_and_env() {
+        assert_eq!(
+            resume_line(
+                "claude-code",
+                U,
+                "/Users/me/it's here",
+                &[("CLAUDE_CONFIG_DIR", "/Users/me/.claude-b".into())]
+            ),
+            Some(format!(
+                "cd '/Users/me/it'\\''s here' && CLAUDE_CONFIG_DIR='/Users/me/.claude-b' claude --resume {U}"
+            ))
+        );
+        assert_eq!(
+            resume_line("devin", "swamp-movie", "/Users/me/work/acme", &[]).as_deref(),
+            Some("cd '/Users/me/work/acme' && devin -r swamp-movie")
+        );
+        assert_eq!(resume_line("gemini", U, "/w", &[]), None);
+    }
+
+    #[test]
+    fn session_env_defaults_and_overrides() {
+        let h = Path::new("/h");
+        for (tool, dir) in [
+            ("claude-code", "/h/.claude"),
+            ("claude-code", "/h/.claude/"),
+            ("codex", "/h/.codex"),
+            ("devin", "/h/.local/share/devin/cli"),
+        ] {
+            assert!(session_env(tool, Some(dir), h).is_empty(), "{tool} {dir}");
+        }
+        assert_eq!(
+            session_env("claude-code", Some("/h/.claude-b"), h),
+            [("CLAUDE_CONFIG_DIR", "/h/.claude-b".to_string())]
+        );
+        assert_eq!(
+            session_env("codex", Some("/x/codex"), h),
+            [("CODEX_HOME", "/x/codex".to_string())]
+        );
+        assert_eq!(
+            session_env("devin", Some("/x/devin/cli"), h),
+            [("XDG_DATA_HOME", "/x".to_string())]
+        );
+        // A Devin folder that is not `<data home>/devin/cli` has no variable.
+        assert!(session_env("devin", Some("/x/other"), h).is_empty());
+        assert!(session_env("codex", None, h).is_empty());
+        assert!(session_env("codex", Some(""), h).is_empty());
+        assert!(session_env("gemini", Some("/x"), h).is_empty());
     }
 
     #[test]

@@ -53,5 +53,16 @@
       }
     }
   ],
-  "warnings": ["kitty: remote control is off"]
+  "warnings": ["kitty: remote control is off"],
+  "closed": [
+    {
+      "tool": "claude-code",
+      "session_id": "4a5b6c7d-0000-4000-8000-00000000beef",
+      "title": "Add dark mode",
+      "cwd": "/Users/me/work/acme-web",
+      "last_prompt": "make the toggle persist",
+      "updated_at": 1793150000000,
+      "resume_command": "cd '/Users/me/work/acme-web' && claude --resume 4a5b6c7d-0000-4000-8000-00000000beef"
+    }
+  ]
 }

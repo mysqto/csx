@@ -168,7 +168,9 @@ test("rowKey uses the ref, else a fallback that stays unique", () => {
 test("parseReport reads the shared fixture that the csx Rust tests also check", () => {
   const text = readFileSync("test/fixtures/report.json", "utf8");
   const r = parseReport(text);
-  assert.deepEqual(r, JSON.parse(text));
+  const raw = JSON.parse(text);
+  assert.deepEqual(r.rows, raw.rows);
+  assert.deepEqual(r.warnings, raw.warnings);
   assert.equal(rowTitle(r.rows[2]), "gemini");
   assert.equal(rowKey(r.rows[2], 2), "tty:ttys009#2");
 });

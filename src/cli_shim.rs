@@ -124,9 +124,11 @@ impl TabsRunner for RealTabs {
             now_ms,
         );
         let backends = Self::backends(kitty_socket);
-        Ok(Self::with_ports(|ports| {
+        let mut report = Self::with_ports(|ports| {
             crate::tabs::app::list(ports, &backends, &crate::agent::registry(), &ctx, opts)
-        }))
+        });
+        crate::tabs::closed::add_closed(&mut report, db, opts, &ctx.home);
+        Ok(report)
     }
 
     fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()> {

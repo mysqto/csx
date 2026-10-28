@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{base_info, is_uuid, shell_quote, Agent, AgentContext};
+use super::{base_info, resume_line, Agent, AgentContext};
 use crate::tabs::process::Process;
 use crate::tabs::{AgentInfo, AgentStatus};
 
@@ -18,10 +18,10 @@ pub struct ClaudeAgent;
 
 /// Titles and prompt found in a transcript tail.
 #[derive(Default)]
-struct TranscriptInfo {
-    custom_title: Option<String>,
-    ai_title: Option<String>,
-    last_prompt: Option<String>,
+pub(crate) struct TranscriptInfo {
+    pub(crate) custom_title: Option<String>,
+    pub(crate) ai_title: Option<String>,
+    pub(crate) last_prompt: Option<String>,
 }
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
@@ -30,14 +30,14 @@ fn str_of(v: &Value, key: &str) -> Option<String> {
 
 /// Directory name Claude uses for a project: every non-alphanumeric byte
 /// becomes `-`.
-fn slug(cwd: &str) -> String {
+pub(crate) fn slug(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
 /// Read the last [`TAIL_BYTES`] of a file as text; a cut first line is dropped.
-fn read_tail(path: &Path) -> Option<String> {
+pub(crate) fn read_tail(path: &Path) -> Option<String> {
     let mut f = File::open(path).ok()?;
     let len = f.metadata().map_or(0, |m| m.len());
     let start = len.saturating_sub(TAIL_BYTES);
@@ -56,7 +56,7 @@ fn read_tail(path: &Path) -> Option<String> {
     })
 }
 
-fn scan_transcript(text: &str) -> TranscriptInfo {
+pub(crate) fn scan_transcript(text: &str) -> TranscriptInfo {
     let mut t = TranscriptInfo::default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -112,8 +112,7 @@ impl Agent for ClaudeAgent {
             if let Some(text) = read_tail(&path) {
                 tr = scan_transcript(&text);
             }
-            info.resume_command =
-                is_uuid(sid).then(|| format!("cd {} && claude --resume {sid}", shell_quote(cwd)));
+            info.resume_command = resume_line(self.tool(), sid, cwd, &[]);
         }
         info.title = tr
             .custom_title

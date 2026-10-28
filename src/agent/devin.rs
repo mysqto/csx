@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use super::{base_info, shell_quote, Agent, AgentContext};
+use super::{base_info, resume_line, Agent, AgentContext};
 use crate::source::devin::open_readonly;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -20,7 +20,7 @@ pub struct DevinAgent;
 /// True for a Devin session name such as `swamp-movie`: lowercase letters and
 /// digits in words joined by single hyphens. Only such ids go into a resume
 /// command.
-fn is_session_name(s: &str) -> bool {
+pub(crate) fn is_session_name(s: &str) -> bool {
     s.split('-').all(|w| {
         !w.is_empty()
             && w.bytes()
@@ -102,8 +102,7 @@ impl Agent for DevinAgent {
         let Some(row) = read_session(&ctx.devin_home.join("sessions.db"), &id) else {
             return info;
         };
-        info.resume_command =
-            is_session_name(&id).then(|| format!("cd {} && devin -r {id}", shell_quote(&row.cwd)));
+        info.resume_command = resume_line(self.tool(), &id, &row.cwd, &[]);
         info.session_id = Some(id);
         info.title = row.title;
         info.cwd = Some(row.cwd);

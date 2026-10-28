@@ -106,6 +106,7 @@ one real adapter.
 | `tabs/app.rs`       | The list pipeline (join tabs, tmux panes and agents) and `focus` routing by ref. | consumes the ports |
 | `tabs/ghostty.rs`, `iterm2.rs`, `terminal_app.rs`, `kitty.rs`, `wezterm.rs` | One `TerminalBackend` per terminal: build commands, parse output. | consume `OsaRunner` / `CommandRunner` |
 | `tabs/tmux.rs`, `tabs/process.rs` | tmux panes nested under outer tabs; the `ps` process table. | consume `CommandRunner` |
+| `tabs/closed.rs`    | Closed sessions for `csx tabs --closed`: indexed sessions no detected agent runs, with title, last prompt and resume command. | — (reads the index and transcripts under a root) |
 | `tabs/render.rs`    | Pure human, JSON and Alfred rendering of a `TabsReport`.              | —                                       |
 | `tabs/os_shim.rs`   | `RealOsa`, `RealCommand`, `RealTty`, `RealSleeper`.                   | tab ports → **shim**                    |
 | `agent/*`           | `Agent` trait, `registry()`, `detect`; `claude.rs`, `codex.rs`, `generic.rs` (process-name agents). | consume `ProcessTable`   |

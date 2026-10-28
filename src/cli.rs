@@ -138,7 +138,8 @@ pub enum AlfredAction {
 pub enum TabsOutput {
     /// Aligned text for people.
     Human,
-    /// `{"rows": [...], "warnings": [...]}`.
+    /// `{"rows": [...], "warnings": [...]}`, plus `"closed": [...]` with
+    /// `--closed`.
     Json,
     /// Alfred script filter JSON.
     Alfred,
@@ -221,6 +222,12 @@ pub enum Command {
         /// Emit Alfred script filter JSON.
         #[arg(long, conflicts_with = "json")]
         alfred: bool,
+        /// Also list closed sessions that can be resumed, from the index.
+        #[arg(long)]
+        closed: bool,
+        /// Most closed sessions to list.
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        closed_limit: usize,
         /// kitty remote-control socket, such as `unix:/var/folders/x/T/kitty-1234`. Default:
         /// `KITTY_LISTEN_ON`, else the `<TMPDIR>/kitty-<pid>` of each running kitty.
         #[arg(long)]
@@ -601,6 +608,8 @@ pub fn dispatch(
             terminals,
             json,
             alfred,
+            closed,
+            closed_limit,
             kitty_socket,
             query,
         }) => {
@@ -618,6 +627,7 @@ pub fn dispatch(
                     .flat_map(|q| q.split_whitespace())
                     .map(String::from)
                     .collect(),
+                closed: closed.then_some(closed_limit),
             };
             let home = tabs.home();
             handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
@@ -1635,6 +1645,7 @@ mod tests {
                 ..Default::default()
             }],
             warnings: vec!["kitty: no socket".into()],
+            ..TabsReport::default()
         }
     }
 
@@ -1657,8 +1668,8 @@ mod tests {
         assert_eq!(
             format!("{:?}", cli.command),
             "Some(Tabs { action: None, agents: true, terminals: [\"ghostty\", \"tmux\"], \
-             json: true, alfred: false, kitty_socket: Some(\"unix:/tmp/k\"), \
-             query: [\"fix\", \"bug\"] })"
+             json: true, alfred: false, closed: false, closed_limit: 50, \
+             kitty_socket: Some(\"unix:/tmp/k\"), query: [\"fix\", \"bug\"] })"
         );
     }
 
@@ -1670,7 +1681,8 @@ mod tests {
                 parse(&["csx", "tabs", "focus", "tty:ttys012"]).command
             ),
             "Some(Tabs { action: Some(Focus { tab_ref: \"tty:ttys012\", kitty_socket: None }), agents: false, \
-             terminals: [], json: false, alfred: false, kitty_socket: None, query: [] })"
+             terminals: [], json: false, alfred: false, closed: false, closed_limit: 50, \
+             kitty_socket: None, query: [] })"
         );
         assert!(format!(
             "{:?}",
@@ -1786,6 +1798,26 @@ tabs_hotkey: None, agents_hotkey: None } })"
             "{last}"
         );
         assert!(last.ends_with("Some(\"s\")"), "{last}");
+    }
+
+    #[test]
+    fn dispatch_tabs_passes_the_closed_limit() {
+        let tabs = FakeTabs::default();
+        let args = ["csx", "tabs", "--agents", "--closed", "--closed-limit", "5"];
+        run_tabs(&[&args[..], &["--json"]].concat(), &tabs).unwrap();
+        run_tabs(&["csx", "tabs", "--closed", "fix"], &tabs).unwrap();
+        run_tabs(&["csx", "tabs", "--closed-limit", "5"], &tabs).unwrap();
+        let seen = tabs.seen.borrow();
+        assert_eq!(
+            seen[0],
+            "list ListOptions { agents_only: true, terminals: [], query: [], closed: Some(5) } None"
+        );
+        assert!(
+            seen[1].contains("query: [\"fix\"], closed: Some(50)"),
+            "{}",
+            seen[1]
+        );
+        assert!(seen[2].contains("closed: None"), "{}", seen[2]);
     }
 
     #[test]

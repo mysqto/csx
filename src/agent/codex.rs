@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use super::{base_info, is_uuid, Agent, AgentContext};
+use super::{base_info, is_uuid, resume_command, Agent, AgentContext};
 use crate::source::claude::parse_iso8601_secs;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -210,7 +210,7 @@ impl Agent for CodexAgent {
         let Some(r) = found else {
             return info;
         };
-        info.resume_command = is_uuid(&r.id).then(|| format!("codex resume {}", r.id));
+        info.resume_command = resume_command(self.tool(), &r.id);
         info.title = first_user_text(&r.path);
         info.session_id = Some(r.id);
         info.cwd = r.cwd;
