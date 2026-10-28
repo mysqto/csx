@@ -86,6 +86,8 @@ one real adapter.
 | `source/jsonl.rs`   | JSONL read helpers (whole-file + offset).                            | —                                       |
 | `source/fileid.rs`  | Stable file keys, size/mtime.                                        | —                                       |
 | `index.rs`          | `sync` — the incremental indexer (watermarks, repo resolution).      | —                                       |
+| `refresh.rs`        | Stale-index check for `tabs --closed`: stamp and lock files, `maybe_refresh`. | consumes `Spawner`                      |
+| `refresh_shim.rs`   | `RealSpawner` (detached `csx sync` child process).                   | `Spawner` → **shim**                    |
 | `repo.rs`           | Stable repo-id resolution from git output.                           | consumes `GitRunner`                    |
 | `git_shim.rs`       | Real `git` subprocess adapter.                                       | `GitRunner` → **shim**                  |
 | `output.rs`         | Pure `Format` (Human/JSON) rendering of every result type.           | —                                       |

@@ -105,6 +105,7 @@ pub fn watch_step(
     }
     if debouncer.take_due(clock.now_ms()) {
         let stats = sync(sources, db, git)?;
+        crate::refresh::record_sync(db.dir());
         Ok(Some(stats))
     } else {
         Ok(None)
@@ -571,6 +572,23 @@ mod tests {
         let out = watch_step(&mut watcher, &mut deb, &clock, &one_source(), &db, &NoGit).unwrap();
         assert!(out.is_none(), "quiet window not elapsed yet");
         assert!(deb.is_dirty());
+    }
+
+    #[test]
+    fn watch_step_flush_stamps_the_index_folder() {
+        let dir = std::env::temp_dir().join(format!("csx-daemon-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(dir.join("index.sqlite").to_str().unwrap()).unwrap();
+        let mut watcher = FakeWatcher::new(vec![Ok(Some(WatchEvent::new("/x"))), Ok(None)]);
+        let mut deb = Debouncer::new(50);
+        let clock = FakeClock::at(0);
+        let sources = one_source();
+        watch_step(&mut watcher, &mut deb, &clock, &sources, &db, &NoGit).unwrap();
+        assert!(!dir.join(crate::refresh::STAMP).exists());
+        clock.set(100);
+        watch_step(&mut watcher, &mut deb, &clock, &sources, &db, &NoGit).unwrap();
+        assert!(dir.join(crate::refresh::STAMP).exists());
     }
 
     #[test]

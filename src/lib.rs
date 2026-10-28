@@ -27,6 +27,8 @@ pub mod mcp_shim;
 pub mod model;
 pub mod output;
 pub mod rag;
+pub mod refresh;
+pub mod refresh_shim;
 pub mod repo;
 pub mod source;
 pub mod tabs;

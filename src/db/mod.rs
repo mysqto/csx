@@ -275,6 +275,7 @@ pub struct CurrentAccount {
 /// Storage handle wrapping a SQLite connection.
 pub struct Db {
     conn: Connection,
+    dir: Option<std::path::PathBuf>,
 }
 
 impl Db {
@@ -286,10 +287,24 @@ impl Db {
         } else {
             Connection::open(path)?
         };
-        let db = Db { conn };
+        let dir = if path == ":memory:" {
+            None
+        } else {
+            let parent = std::path::Path::new(path).parent();
+            Some(match parent {
+                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                _ => std::path::PathBuf::from("."),
+            })
+        };
+        let db = Db { conn, dir };
         db.configure()?;
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Folder holding the database file; `None` for an in-memory database.
+    pub fn dir(&self) -> Option<&std::path::Path> {
+        self.dir.as_deref()
     }
 
     /// Connection PRAGMAs tuned for the insert-heavy indexer: WAL journaling

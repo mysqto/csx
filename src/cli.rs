@@ -456,6 +456,7 @@ pub fn handle_sync(
     out: &mut dyn Write,
 ) -> Result<()> {
     let stats = sync(sources, db, git)?;
+    crate::refresh::record_sync(db.dir());
     writeln!(
         out,
         "{}",
@@ -1318,6 +1319,26 @@ mod tests {
                 new_watermark: 10,
             })
         }
+    }
+
+    #[test]
+    fn handle_sync_stamps_and_unlocks_the_index_folder() {
+        let dir = std::env::temp_dir().join(format!("csx-cli-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::refresh::LOCK), "").unwrap();
+        let db = Db::open(dir.join("index.sqlite").to_str().unwrap()).unwrap();
+        let srcs: Vec<Box<dyn SessionSource>> = vec![Box::new(OneShotSource)];
+        struct OkGit;
+        impl GitRunner for OkGit {
+            fn run(&self, _cwd: &str, _args: &[&str]) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+        let mut buf = Vec::new();
+        handle_sync(&srcs, &db, &OkGit, false, &mut buf).unwrap();
+        assert!(dir.join(crate::refresh::STAMP).exists());
+        assert!(!dir.join(crate::refresh::LOCK).exists());
     }
 
     #[test]

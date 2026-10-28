@@ -77,7 +77,12 @@ impl McpRunner for RealMcp {
 /// Real [`TabsRunner`]: builds the OS ports and the agent context, then calls
 /// the tabs pipeline or the Alfred installer. Off macOS it lists nothing and
 /// refuses the other actions.
-struct RealTabs;
+struct RealTabs {
+    /// Folder of the index; holds the sync stamp and lock.
+    index_dir: Option<std::path::PathBuf>,
+    /// This executable, started as `csx sync` for a background refresh.
+    exe: Option<std::path::PathBuf>,
+}
 
 fn home_from_env() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
@@ -94,6 +99,19 @@ impl RealTabs {
             tty: &RealTty,
             sleep: &RealSleeper,
         })
+    }
+
+    /// Start a background `csx sync` when the index is stale.
+    fn refresh(&self) -> Result<bool> {
+        let (Some(dir), Some(exe)) = (&self.index_dir, &self.exe) else {
+            return Ok(false);
+        };
+        crate::refresh::maybe_refresh(
+            dir,
+            std::time::SystemTime::now(),
+            exe,
+            &crate::refresh_shim::RealSpawner,
+        )
     }
 
     fn backends(flag: Option<String>) -> Vec<Box<dyn crate::tabs::TerminalBackend>> {
@@ -127,6 +145,11 @@ impl TabsRunner for RealTabs {
         let mut report = Self::with_ports(|ports| {
             crate::tabs::app::list(ports, &backends, &crate::agent::registry(), &ctx, opts)
         });
+        if opts.closed.is_some() {
+            if let Err(e) = self.refresh() {
+                report.warnings.push(format!("refresh: {e}"));
+            }
+        }
         crate::tabs::closed::add_closed(&mut report, db, opts, &ctx.home);
         Ok(report)
     }
@@ -237,7 +260,10 @@ pub fn run() -> Result<()> {
         engine.as_ref(),
         &RealDaemon,
         &RealMcp,
-        &RealTabs,
+        &RealTabs {
+            index_dir: db_path.parent().map(std::path::Path::to_path_buf),
+            exe: std::env::current_exe().ok(),
+        },
         &mut lock,
     )
 }
