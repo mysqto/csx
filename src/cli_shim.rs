@@ -107,6 +107,22 @@ impl RealTabs {
         let tmpdir = std::env::var("TMPDIR").ok();
         crate::tabs::app::backends(crate::cli::resolve_kitty_socket(flag, env), tmpdir)
     }
+
+    /// The agent context from the real environment and the index.
+    fn context(&self, db: &Db) -> crate::agent::AgentContext {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        crate::cli::tabs_context(
+            self.home(),
+            db.config_dirs("claude-code").unwrap_or_default(),
+            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+            std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from),
+            now_ms,
+        )
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -117,18 +133,7 @@ impl TabsRunner for RealTabs {
         opts: &crate::tabs::app::ListOptions,
         kitty_socket: Option<String>,
     ) -> Result<crate::tabs::TabsReport> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_default();
-        let ctx = crate::cli::tabs_context(
-            self.home(),
-            db.config_dirs("claude-code").unwrap_or_default(),
-            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
-            std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
-            std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from),
-            now_ms,
-        );
+        let ctx = self.context(db);
         let backends = Self::backends(kitty_socket);
         let mut report = Self::with_ports(|ports| {
             crate::tabs::app::list(ports, &backends, &crate::agent::registry(), &ctx, opts)
@@ -147,6 +152,36 @@ impl TabsRunner for RealTabs {
     fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()> {
         let backends = Self::backends(kitty_socket);
         Self::with_ports(|ports| crate::tabs::app::focus(ports, &backends, tab_ref))
+    }
+
+    fn open(
+        &self,
+        db: &Db,
+        terminal: &str,
+        tool: &str,
+        session_id: &str,
+        kitty_socket: Option<String>,
+    ) -> Result<crate::tabs::open::OpenOutcome> {
+        let ctx = self.context(db);
+        let backends = Self::backends(kitty_socket);
+        Self::with_ports(|ports| {
+            crate::tabs::open::open_session(
+                ports,
+                &backends,
+                &crate::agent::registry(),
+                &ctx,
+                db,
+                terminal,
+                tool,
+                session_id,
+            )
+        })
+    }
+
+    fn terminals(&self) -> Result<Vec<&'static crate::tabs::TerminalInfo>> {
+        Ok(crate::tabs::installed_terminals(
+            &crate::tabs::os_shim::RealCommand,
+        ))
     }
 
     fn alfred_install(
@@ -179,6 +214,21 @@ impl TabsRunner for RealTabs {
     }
 
     fn focus(&self, _tab_ref: &str, _kitty_socket: Option<String>) -> Result<()> {
+        Err(Error::other("csx tabs is supported on macOS only"))
+    }
+
+    fn open(
+        &self,
+        _db: &Db,
+        _terminal: &str,
+        _tool: &str,
+        _session_id: &str,
+        _kitty_socket: Option<String>,
+    ) -> Result<crate::tabs::open::OpenOutcome> {
+        Err(Error::other("csx tabs is supported on macOS only"))
+    }
+
+    fn terminals(&self) -> Result<Vec<&'static crate::tabs::TerminalInfo>> {
         Err(Error::other("csx tabs is supported on macOS only"))
     }
 

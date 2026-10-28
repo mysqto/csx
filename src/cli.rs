@@ -25,8 +25,9 @@ use crate::output::{
 };
 use crate::source::SessionSource;
 use crate::tabs::app::ListOptions;
+use crate::tabs::open::OpenOutcome;
 use crate::tabs::render::{render_alfred_with_home, render_human, render_json};
-use crate::tabs::TabsReport;
+use crate::tabs::{TabsReport, TerminalInfo};
 
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
@@ -113,6 +114,27 @@ pub enum TabsAction {
         /// kitty remote-control socket, such as `unix:/tmp/kitty`.
         #[arg(long)]
         kitty_socket: Option<String>,
+    },
+    /// Resume a closed session in a new tab, or focus the tab that runs it.
+    /// Prints `focused <ref>` when it focused a tab, else nothing.
+    Open {
+        /// Terminal to open the tab in: ghostty, iterm2, terminal, kitty or
+        /// wezterm.
+        #[arg(long)]
+        terminal: String,
+        /// Tool of the session: claude-code, codex or devin.
+        tool: String,
+        /// Session id, as `csx tabs --closed --json` lists it.
+        session_id: String,
+        /// kitty remote-control socket, such as `unix:/tmp/kitty`.
+        #[arg(long)]
+        kitty_socket: Option<String>,
+    },
+    /// List the installed terminals that `open` can use.
+    Terminals {
+        /// Emit `[{"id": ..., "name": ...}]` as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -326,6 +348,18 @@ pub trait TabsRunner {
         -> Result<TabsReport>;
     /// Focus the tab named by `tab_ref`.
     fn focus(&self, tab_ref: &str, kitty_socket: Option<String>) -> Result<()>;
+    /// Resume session `session_id` of `tool` in a new tab of `terminal`, or
+    /// focus the tab that already runs it.
+    fn open(
+        &self,
+        db: &Db,
+        terminal: &str,
+        tool: &str,
+        session_id: &str,
+        kitty_socket: Option<String>,
+    ) -> Result<OpenOutcome>;
+    /// The installed terminals `open` can use, in picker order.
+    fn terminals(&self) -> Result<Vec<&'static TerminalInfo>>;
     /// Install or update the Alfred workflow; `prefs` overrides discovery and
     /// `hotkeys` overrides hotkeys kept from the previous install.
     fn alfred_install(&self, prefs: Option<PathBuf>, hotkeys: &Hotkeys) -> Result<InstallReport>;
@@ -409,6 +443,31 @@ pub fn handle_tabs(
         }
     };
     writeln!(out, "{}", text.trim_end_matches('\n'))?;
+    Ok(())
+}
+
+/// Handle `csx tabs open`: print `focused <ref>` when a tab was focused.
+pub fn handle_tabs_open(outcome: &OpenOutcome, out: &mut dyn Write) -> Result<()> {
+    if let OpenOutcome::Focused(tab_ref) = outcome {
+        writeln!(out, "focused {tab_ref}")?;
+    }
+    Ok(())
+}
+
+/// Handle `csx tabs terminals`: JSON `[{"id", "name"}]`, or one
+/// `id<TAB>name` line per terminal.
+pub fn handle_tabs_terminals(
+    terminals: &[&TerminalInfo],
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<()> {
+    if json {
+        writeln!(out, "{}", serde_json::to_string(terminals)?)?;
+    } else {
+        for t in terminals {
+            writeln!(out, "{}\t{}", t.id, t.name)?;
+        }
+    }
     Ok(())
 }
 
@@ -603,6 +662,23 @@ pub fn dispatch(
                 }),
             ..
         }) => tabs.focus(&tab_ref, kitty_socket),
+        Some(Command::Tabs {
+            action:
+                Some(TabsAction::Open {
+                    terminal,
+                    tool,
+                    session_id,
+                    kitty_socket,
+                }),
+            ..
+        }) => {
+            let outcome = tabs.open(db, &terminal, &tool, &session_id, kitty_socket)?;
+            handle_tabs_open(&outcome, out)
+        }
+        Some(Command::Tabs {
+            action: Some(TabsAction::Terminals { json }),
+            ..
+        }) => handle_tabs_terminals(&tabs.terminals()?, json, out),
         Some(Command::Tabs {
             action: None,
             agents,
@@ -1580,6 +1656,19 @@ mod tests {
         fn focus(&self, _: &str, _: Option<String>) -> Result<()> {
             Err(Error::other("tabs should not be called"))
         }
+        fn open(
+            &self,
+            _: &Db,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<String>,
+        ) -> Result<OpenOutcome> {
+            Err(Error::other("tabs should not be called"))
+        }
+        fn terminals(&self) -> Result<Vec<&'static TerminalInfo>> {
+            Err(Error::other("tabs should not be called"))
+        }
         fn alfred_install(&self, _: Option<PathBuf>, _: &Hotkeys) -> Result<InstallReport> {
             Err(Error::other("tabs should not be called"))
         }
@@ -1592,6 +1681,8 @@ mod tests {
     #[derive(Default)]
     struct FakeTabs {
         report: TabsReport,
+        outcome: Option<OpenOutcome>,
+        terminals: Vec<&'static TerminalInfo>,
         install: Option<InstallReport>,
         fail: bool,
         home: Option<PathBuf>,
@@ -1620,6 +1711,29 @@ mod tests {
                 return Err(Error::other("tabs boom"));
             }
             Ok(())
+        }
+        fn open(
+            &self,
+            _: &Db,
+            terminal: &str,
+            tool: &str,
+            session_id: &str,
+            kitty_socket: Option<String>,
+        ) -> Result<OpenOutcome> {
+            self.seen.borrow_mut().push(format!(
+                "open {terminal} {tool} {session_id} {kitty_socket:?}"
+            ));
+            if self.fail {
+                return Err(Error::other("tabs boom"));
+            }
+            Ok(self.outcome.clone().unwrap())
+        }
+        fn terminals(&self) -> Result<Vec<&'static TerminalInfo>> {
+            self.seen.borrow_mut().push("terminals".into());
+            if self.fail {
+                return Err(Error::other("tabs boom"));
+            }
+            Ok(self.terminals.clone())
         }
         fn alfred_install(
             &self,
@@ -1819,6 +1933,121 @@ tabs_hotkey: None, agents_hotkey: None } })"
             "{last}"
         );
         assert!(last.ends_with("Some(\"s\")"), "{last}");
+    }
+
+    #[test]
+    fn parses_tabs_open() {
+        let text = |args: &[&str]| format!("{:?}", parse(args).command);
+        let t = text(&[
+            "csx",
+            "tabs",
+            "open",
+            "--terminal",
+            "ghostty",
+            "codex",
+            "abc",
+        ]);
+        assert!(
+            t.contains(
+                "action: Some(Open { terminal: \"ghostty\", tool: \"codex\", \
+                 session_id: \"abc\", kitty_socket: None })"
+            ),
+            "{t}"
+        );
+        // Raycast passes `--` before the session.
+        let t = text(&[
+            "csx",
+            "tabs",
+            "open",
+            "--terminal",
+            "kitty",
+            "--kitty-socket",
+            "unix:/k",
+            "--",
+            "devin",
+            "-odd-",
+        ]);
+        assert!(
+            t.contains("tool: \"devin\", session_id: \"-odd-\", kitty_socket: Some(\"unix:/k\")"),
+            "{t}"
+        );
+        // The terminal is required, and so are both positionals.
+        assert!(Cli::try_parse_from(["csx", "tabs", "open", "codex", "abc"]).is_err());
+        assert!(
+            Cli::try_parse_from(["csx", "tabs", "open", "--terminal", "ghostty", "codex"]).is_err()
+        );
+        let t = text(&["csx", "tabs", "terminals", "--json"]);
+        assert!(t.contains("action: Some(Terminals { json: true })"), "{t}");
+    }
+
+    #[test]
+    fn dispatch_tabs_open_prints_only_a_focus() {
+        let opened = FakeTabs {
+            outcome: Some(OpenOutcome::Opened),
+            ..Default::default()
+        };
+        let args = [
+            "csx",
+            "tabs",
+            "open",
+            "--terminal",
+            "wezterm",
+            "--",
+            "codex",
+            "u1",
+        ];
+        assert_eq!(run_tabs(&args, &opened).unwrap(), "");
+        assert_eq!(opened.seen.borrow()[0], "open wezterm codex u1 None");
+        let focused = FakeTabs {
+            outcome: Some(OpenOutcome::Focused("iterm2:S-1".into())),
+            ..Default::default()
+        };
+        assert_eq!(run_tabs(&args, &focused).unwrap(), "focused iterm2:S-1\n");
+        let failing = FakeTabs {
+            fail: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            run_tabs(&args, &failing).unwrap_err().to_string(),
+            "tabs boom"
+        );
+    }
+
+    #[test]
+    fn dispatch_tabs_terminals_as_json_or_lines() {
+        use crate::tabs::{GHOSTTY, TERMINAL};
+        let tabs = FakeTabs {
+            terminals: vec![&GHOSTTY, &TERMINAL],
+            ..Default::default()
+        };
+        assert_eq!(
+            run_tabs(&["csx", "tabs", "terminals", "--json"], &tabs).unwrap(),
+            "[{\"id\":\"ghostty\",\"name\":\"Ghostty\"},{\"id\":\"terminal\",\"name\":\"Terminal\"}]\n"
+        );
+        assert_eq!(
+            run_tabs(&["csx", "tabs", "terminals"], &tabs).unwrap(),
+            "ghostty\tGhostty\nterminal\tTerminal\n"
+        );
+        let none = FakeTabs::default();
+        assert_eq!(run_tabs(&["csx", "tabs", "terminals"], &none).unwrap(), "");
+        assert_eq!(
+            run_tabs(&["csx", "tabs", "terminals", "--json"], &none).unwrap(),
+            "[]\n"
+        );
+        let failing = FakeTabs {
+            fail: true,
+            ..Default::default()
+        };
+        assert!(run_tabs(&["csx", "tabs", "terminals"], &failing).is_err());
+    }
+
+    #[test]
+    fn tabs_open_and_terminals_handlers_propagate_write_errors() {
+        use crate::tabs::GHOSTTY;
+        let focused = OpenOutcome::Focused("x:1".into());
+        assert!(handle_tabs_open(&focused, &mut FailWriter).is_err());
+        assert!(handle_tabs_terminals(&[&GHOSTTY], true, &mut FailWriter).is_err());
+        assert!(handle_tabs_terminals(&[&GHOSTTY], false, &mut FailWriter).is_err());
     }
 
     #[test]
@@ -2048,6 +2277,8 @@ tabs_hotkey: None, agents_hotkey: None } })"
         let db = fixture_db();
         assert!(NoTabs.list(&db, &ListOptions::default(), None).is_err());
         assert!(NoTabs.focus("x", None).is_err());
+        assert!(NoTabs.open(&db, "ghostty", "codex", "x", None).is_err());
+        assert!(NoTabs.terminals().is_err());
         assert!(NoTabs.alfred_install(None, &Hotkeys::default()).is_err());
         assert_eq!(NoTabs.home(), None);
     }

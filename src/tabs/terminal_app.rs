@@ -64,6 +64,22 @@ fn focus_script(window_id: u64, index: u64) -> String {
     )
 }
 
+/// Runs `line` with `do script`, which opens a new window (AppleScript has no
+/// "new tab"; keystrokes would need the Accessibility permission). Apple
+/// events start Terminal when it is not running.
+fn open_script(line: &str) -> String {
+    // Serializing a string cannot fail.
+    let line = serde_json::to_string(line).unwrap_or_default();
+    format!(
+        r#"(() => {{
+  const app = Application("Terminal");
+  app.doScript({line});
+  app.activate();
+  return "ok";
+}})()"#
+    )
+}
+
 fn parse_ref(tab_ref: &str) -> Option<(u64, u64)> {
     let (w, i) = tab_ref.strip_prefix(REF_PREFIX)?.split_once(':')?;
     Some((w.parse().ok()?, i.parse().ok()?))
@@ -122,11 +138,17 @@ impl TerminalBackend for TerminalApp {
             None => Ok(false),
         }
     }
+
+    fn open_tab(&self, ports: &Ports, _cwd: &str, line: &str) -> Result<()> {
+        ports.osa.run_jxa(&open_script(line))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::test_support::{log, FakeOs};
     use crate::tabs::{CommandRunner, OsaRunner, Sleeper, TtyWriter};
     use std::cell::RefCell;
 
@@ -269,5 +291,28 @@ mod tests {
         let osa = Osa::new(&["not json", "oops"]);
         assert!(TerminalApp.list(&ports(&osa)).is_err());
         assert!(TerminalApp.focus(&ports(&osa), "terminal:1:1").is_err());
+    }
+
+    /// A folder with a quote and a line with a quote, a double quote and
+    /// backslashes, as `resume_line` could build them.
+    const CWD: &str = "/Users/me/it's here";
+    const LINE: &str = r#"cd '/Users/me/it'\''s here' && echo "a\b""#;
+    /// `LINE` as a JXA string literal.
+    const LINE_LIT: &str = r#""cd '/Users/me/it'\\''s here' && echo \"a\\b\"""#;
+
+    #[test]
+    fn open_tab_runs_the_line_in_a_new_window() {
+        let l = log();
+        let os = FakeOs::new(&l).osa("ok");
+        TerminalApp.open_tab(&os.ports(), CWD, LINE).unwrap();
+        // One script, no command: `do script` starts Terminal when needed.
+        assert_eq!(*l.borrow(), ["osa"]);
+        let s = os.scripts.borrow()[0].clone();
+        assert!(s.contains(r#"const app = Application("Terminal");"#), "{s}");
+        assert!(s.contains(&format!("app.doScript({LINE_LIT});")), "{s}");
+        assert!(s.contains("app.activate();"));
+        let os = FakeOs::new(&log()).osa_fail("not allowed");
+        let e = TerminalApp.open_tab(&os.ports(), CWD, LINE).unwrap_err();
+        assert_eq!(e.to_string(), "not allowed");
     }
 }

@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 const REF_PREFIX: &str = "kitty:";
 const REMOTE_CONTROL_HINT: &str = "kitty: turn on allow_remote_control and listen_on in kitty.conf";
+const NOT_RUNNING: &str = "kitty is not running with remote control";
 
 /// The kitty backend.
 pub struct Kitty {
@@ -151,6 +152,16 @@ impl Kitty {
         parse_entries(&out, &procs).map(|es| Some((socket, es)))
     }
 
+    /// Sockets for a command that changes kitty: the explicit socket needs
+    /// no probing; otherwise one per running kitty, as `list` finds them.
+    fn command_sockets(&self, ports: &Ports) -> Result<Vec<Option<String>>> {
+        let pids = match &self.socket {
+            Some(_) => Vec::new(),
+            None => Self::pids(ports).ok_or_else(|| Error::other(NOT_RUNNING))?,
+        };
+        Ok(self.candidates(&pids))
+    }
+
     fn focus_window(ports: &Ports, socket: Option<&str>, id: u64) -> Result<()> {
         let m = format!("id:{id}");
         kitten(ports, socket, &["focus-window", "--match", &m])?;
@@ -197,6 +208,30 @@ impl TerminalBackend for Kitty {
             Some((id, _)) => Self::focus_window(ports, socket.as_deref(), *id).map(|_| true),
             None => Ok(false),
         }
+    }
+
+    /// `kitten @ launch --type=tab --cwd <cwd>` prints the new window's id;
+    /// `send-text` then types `line` and a return into that window.
+    fn open_tab(&self, ports: &Ports, cwd: &str, line: &str) -> Result<()> {
+        let sockets = self.command_sockets(ports)?;
+        let (socket, out) = Self::first_ok(sockets, |s| {
+            kitten(ports, s, &["launch", "--type=tab", "--cwd", cwd])
+        })
+        .map_err(|e| Error::other(format!("{REMOTE_CONTROL_HINT} (kitten: {e})")))?;
+        let id: u64 = out.trim().parse().map_err(|_| {
+            Error::other(format!("kitty: unexpected launch output: {}", out.trim()))
+        })?;
+        let m = format!("id:{id}");
+        // kitty reads the text with Python escapes: keep backslashes, end
+        // with a return.
+        let text = format!("{}\\r", line.replace('\\', "\\\\"));
+        kitten(
+            ports,
+            socket.as_deref(),
+            &["send-text", "--match", &m, &text],
+        )?;
+        ports.osa.run_jxa(r#"Application("kitty").activate()"#)?;
+        Ok(())
     }
 }
 
@@ -635,6 +670,131 @@ mod tests {
         // No candidate at all keeps the default error.
         let e = Kitty::first_ok::<()>(vec![], |_| Ok(())).unwrap_err();
         assert!(e.to_string().contains("no kitty socket"));
+    }
+
+    /// A folder with a quote and a line with a quote, a double quote and
+    /// backslashes, as `resume_line` could build them.
+    const CWD: &str = "/Users/me/it's here";
+    const LINE: &str = r#"cd '/Users/me/it'\''s here' && echo "a\b""#;
+
+    /// kitty with pids `pids` (`None`: not running). `kitten ... launch`
+    /// answers `launch_out`; any command line that contains `fail` fails.
+    struct OpenCmd {
+        pids: Option<&'static str>,
+        launch_out: &'static str,
+        fail: &'static str,
+        calls: RefCell<Vec<String>>,
+    }
+    impl CommandRunner for OpenCmd {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String> {
+            let line = format!("{program} {}", args.join(" "));
+            self.calls.borrow_mut().push(line.clone());
+            if !self.fail.is_empty() && line.contains(self.fail) {
+                return Err(Error::other("refused"));
+            }
+            match program {
+                "pgrep" => self.pids.map(String::from).ok_or(Error::other("exit 1")),
+                _ if args.contains(&"launch") => Ok(self.launch_out.into()),
+                _ => Ok(String::new()),
+            }
+        }
+    }
+
+    fn open_cmd(
+        pids: Option<&'static str>,
+        launch_out: &'static str,
+        fail: &'static str,
+    ) -> OpenCmd {
+        OpenCmd {
+            pids,
+            launch_out,
+            fail,
+            calls: RefCell::new(vec![]),
+        }
+    }
+
+    /// Open a tab with `k`; the result, the command lines and the scripts.
+    fn open_with(k: &Kitty, cmd: OpenCmd, osa: &dyn OsaRunner) -> (Result<()>, Vec<String>) {
+        let ports = Ports {
+            osa,
+            cmd: &cmd,
+            tty: &NoTty,
+            sleep: &NoSleep,
+        };
+        let r = k.open_tab(&ports, CWD, LINE);
+        (r, cmd.calls.into_inner())
+    }
+
+    fn with_socket(socket: Option<&str>, tmpdir: Option<&str>) -> Kitty {
+        Kitty {
+            socket: socket.map(String::from),
+            tmpdir: tmpdir.map(String::from),
+        }
+    }
+
+    /// `LINE` with its backslashes doubled, then `\r`: kitty reads the text
+    /// with Python escapes.
+    const SENT: &str = r#"cd '/Users/me/it'\\''s here' && echo "a\\b"\r"#;
+
+    #[test]
+    fn open_tab_launches_a_tab_then_sends_the_line() {
+        let osa = Osa(RefCell::new(vec![]));
+        let k = with_socket(Some("unix:/tmp/k"), None);
+        let (r, calls) = open_with(&k, open_cmd(Some("31"), "42\n", ""), &osa);
+        r.unwrap();
+        assert_eq!(
+            calls,
+            [
+                "kitten @ --to unix:/tmp/k launch --type=tab --cwd /Users/me/it's here".to_string(),
+                format!("kitten @ --to unix:/tmp/k send-text --match id:42 {SENT}"),
+            ]
+        );
+        assert_eq!(*osa.0.borrow(), [r#"Application("kitty").activate()"#]);
+    }
+
+    #[test]
+    fn open_tab_finds_the_socket_as_list_does() {
+        let osa = Osa(RefCell::new(vec![]));
+        let k = with_socket(None, Some("/var/t"));
+        let (r, calls) = open_with(&k, open_cmd(Some("31\n"), "7", ""), &osa);
+        r.unwrap();
+        assert_eq!(calls[0], "pgrep -x kitty");
+        assert!(calls[1].starts_with("kitten @ --to unix:/var/t/kitty-31 launch "));
+        assert!(calls[2].starts_with("kitten @ --to unix:/var/t/kitty-31 send-text --match id:7 "));
+    }
+
+    #[test]
+    fn open_tab_errors() {
+        let osa = Osa(RefCell::new(vec![]));
+        let k = with_socket(None, Some("/var/t"));
+        // kitty is not running.
+        let (r, calls) = open_with(&k, open_cmd(None, "1", ""), &osa);
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "kitty is not running with remote control"
+        );
+        assert_eq!(calls, ["pgrep -x kitty"]);
+        // No socket answers.
+        let (r, calls) = open_with(&k, open_cmd(Some("31"), "1", "launch"), &osa);
+        let e = r.unwrap_err().to_string();
+        assert!(
+            e.contains("allow_remote_control") && e.contains("refused"),
+            "{e}"
+        );
+        assert_eq!(calls.len(), 2);
+        // An answer that is not a window id.
+        let (r, _) = open_with(&k, open_cmd(Some("31"), "oops\n", ""), &osa);
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "kitty: unexpected launch output: oops"
+        );
+        // send-text fails.
+        let (r, _) = open_with(&k, open_cmd(Some("31"), "1", "send-text"), &osa);
+        assert_eq!(r.unwrap_err().to_string(), "refused");
+        assert!(osa.0.borrow().is_empty());
+        // Activation fails.
+        let (r, _) = open_with(&k, open_cmd(Some("31"), "1", ""), &FailOsa);
+        assert_eq!(r.unwrap_err().to_string(), "osa");
     }
 
     #[test]

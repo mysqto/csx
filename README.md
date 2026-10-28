@@ -216,8 +216,17 @@ csx tabs fix login            # only rows that match every word
 csx tabs --json               # {"rows": [...], "warnings": [...]}
 csx tabs --alfred             # Alfred script filter JSON
 csx tabs focus <ref>          # bring one tab to the front
+csx tabs terminals --json     # installed terminals that `open` can use
+csx tabs open --terminal ghostty codex <session id>  # resume in a new tab
 csx alfred install            # install or update the Alfred workflow
 ```
+
+`csx tabs open` resumes an indexed Claude Code, Codex or Devin session. You
+give the terminal, the tool and the session id. csx takes the folder from its
+index and builds the resume command itself. It opens a new tab in that
+folder, types the command, and brings the terminal to the front. If an agent
+already runs the session, csx focuses that tab and prints `focused <ref>`.
+Terminal.app opens a new window, because its AppleScript has no "new tab".
 
 `--json` prints one object. `rows` holds the tabs. `warnings` holds short
 messages about terminals that could not be read. `--alfred` and `--json`

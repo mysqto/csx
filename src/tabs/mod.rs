@@ -6,6 +6,7 @@ pub mod closed;
 pub mod ghostty;
 pub mod iterm2;
 pub mod kitty;
+pub mod open;
 pub mod os_shim;
 pub mod process;
 pub mod render;
@@ -153,6 +154,105 @@ pub struct Ports<'a> {
     pub sleep: &'a dyn Sleeper,
 }
 
+/// A terminal that `csx tabs open` can open a tab in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TerminalInfo {
+    /// The id `--terminal` takes, for example `ghostty`.
+    pub id: &'static str,
+    /// Display name, for example `Ghostty`.
+    pub name: &'static str,
+    /// macOS bundle id, used to find and start the app.
+    #[serde(skip)]
+    pub bundle_id: &'static str,
+}
+
+/// Ghostty.
+pub const GHOSTTY: TerminalInfo = TerminalInfo {
+    id: "ghostty",
+    name: "Ghostty",
+    bundle_id: "com.mitchellh.ghostty",
+};
+/// iTerm2.
+pub const ITERM2: TerminalInfo = TerminalInfo {
+    id: "iterm2",
+    name: "iTerm2",
+    bundle_id: "com.googlecode.iterm2",
+};
+/// Terminal, which ships with macOS.
+pub const TERMINAL: TerminalInfo = TerminalInfo {
+    id: "terminal",
+    name: "Terminal",
+    bundle_id: "com.apple.Terminal",
+};
+/// kitty.
+pub const KITTY: TerminalInfo = TerminalInfo {
+    id: "kitty",
+    name: "kitty",
+    bundle_id: "net.kovidgoyal.kitty",
+};
+/// WezTerm.
+pub const WEZTERM: TerminalInfo = TerminalInfo {
+    id: "wezterm",
+    name: "WezTerm",
+    bundle_id: "com.github.wez.wezterm",
+};
+
+/// Every terminal `csx tabs open` supports, in the order pickers show them.
+pub const TERMINALS: &[TerminalInfo] = &[GHOSTTY, ITERM2, TERMINAL, KITTY, WEZTERM];
+
+/// The terminals of [`TERMINALS`] that are installed, in that order. A
+/// terminal is installed when Spotlight finds an app with its bundle id.
+/// Terminal ships with macOS and always counts.
+pub fn installed_terminals(cmd: &dyn CommandRunner) -> Vec<&'static TerminalInfo> {
+    TERMINALS
+        .iter()
+        .filter(|t| {
+            t.id == TERMINAL.id
+                || cmd
+                    .run(
+                        "mdfind",
+                        &[&format!("kMDItemCFBundleIdentifier == '{}'", t.bundle_id)],
+                    )
+                    .is_ok_and(|out| !out.trim().is_empty())
+        })
+        .collect()
+}
+
+/// How many times csx checks that a terminal it started is ready.
+pub const LAUNCH_POLLS: u32 = 20;
+/// Time between two of those checks, in milliseconds.
+pub const LAUNCH_POLL_MS: u64 = 250;
+
+/// True when the app named `app` runs, asked through JXA. A failed run
+/// counts as not running.
+pub fn app_running(ports: &Ports, app: &str) -> bool {
+    let script = format!(
+        r#"(() => {{ try {{ return String(Application({}).running()); }} catch (e) {{ return "false"; }} }})()"#,
+        serde_json::to_string(app).unwrap_or_default()
+    );
+    ports
+        .osa
+        .run_jxa(&script)
+        .is_ok_and(|out| out.trim() == "true")
+}
+
+/// Start the terminal with `open -b <bundle id>`, then check `ready` up to
+/// [`LAUNCH_POLLS`] times, [`LAUNCH_POLL_MS`] apart. Error `<name> did not
+/// start` when it never gets ready.
+pub fn launch(ports: &Ports, info: &TerminalInfo, ready: &dyn Fn(&Ports) -> bool) -> Result<()> {
+    ports.cmd.run("open", &["-b", info.bundle_id])?;
+    for _ in 0..LAUNCH_POLLS {
+        ports.sleep.sleep_ms(LAUNCH_POLL_MS);
+        if ready(ports) {
+            return Ok(());
+        }
+    }
+    Err(crate::error::Error::other(format!(
+        "{} did not start",
+        info.name
+    )))
+}
+
 /// A terminal application that can list and focus its tabs.
 pub trait TerminalBackend {
     /// Stable terminal id.
@@ -163,6 +263,14 @@ pub trait TerminalBackend {
     fn focus(&self, ports: &Ports, tab_ref: &str) -> Result<()>;
     /// Focus the tab that owns `tty`. `Ok(false)` when this app has no such tab.
     fn focus_tty(&self, ports: &Ports, tty: &str) -> Result<bool>;
+    /// Open a new tab in `cwd`, type `line` and a newline into it, and bring
+    /// the app to the front. Starts the app when it is not running.
+    fn open_tab(&self, _ports: &Ports, _cwd: &str, _line: &str) -> Result<()> {
+        Err(crate::error::Error::other(format!(
+            "{} cannot open tabs",
+            self.id()
+        )))
+    }
 }
 
 /// True when every query word (compared case-insensitively) appears in the joined searchable
@@ -402,6 +510,135 @@ mod tests {
             w.0.borrow().as_slice(),
             &[("ttys001".to_string(), b"hi".to_vec())]
         );
+    }
+
+    use crate::tabs::test_support::{log, FakeOs};
+    use std::cell::Cell;
+
+    #[test]
+    fn terminals_in_target_order_and_json_without_bundle_id() {
+        let ids: Vec<&str> = TERMINALS.iter().map(|t| t.id).collect();
+        assert_eq!(ids, ["ghostty", "iterm2", "terminal", "kitty", "wezterm"]);
+        let names: Vec<&str> = TERMINALS.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["Ghostty", "iTerm2", "Terminal", "kitty", "WezTerm"]);
+        let bundles: Vec<&str> = TERMINALS.iter().map(|t| t.bundle_id).collect();
+        assert_eq!(
+            bundles,
+            [
+                "com.mitchellh.ghostty",
+                "com.googlecode.iterm2",
+                "com.apple.Terminal",
+                "net.kovidgoyal.kitty",
+                "com.github.wez.wezterm"
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string(&TERMINALS[..2]).unwrap(),
+            r#"[{"id":"ghostty","name":"Ghostty"},{"id":"iterm2","name":"iTerm2"}]"#
+        );
+    }
+
+    #[test]
+    fn installed_terminals_asks_spotlight_per_bundle_id() {
+        let q = |b: &str| format!("mdfind kMDItemCFBundleIdentifier == '{b}'");
+        let l = log();
+        let os = FakeOs::new(&l)
+            .answer(&q("com.mitchellh.ghostty"), "/Applications/Ghostty.app\n")
+            .answer(&q("com.googlecode.iterm2"), " \n")
+            .fail(&q("net.kovidgoyal.kitty"), "mdfind failed")
+            .answer(&q("com.github.wez.wezterm"), "/Applications/WezTerm.app\n");
+        let got: Vec<&str> = installed_terminals(&os).iter().map(|t| t.id).collect();
+        assert_eq!(got, ["ghostty", "terminal", "wezterm"]);
+        // Terminal ships with macOS: it needs no lookup.
+        assert_eq!(
+            *l.borrow(),
+            [
+                "run:mdfind kMDItemCFBundleIdentifier == 'com.mitchellh.ghostty'",
+                "run:mdfind kMDItemCFBundleIdentifier == 'com.googlecode.iterm2'",
+                "run:mdfind kMDItemCFBundleIdentifier == 'net.kovidgoyal.kitty'",
+                "run:mdfind kMDItemCFBundleIdentifier == 'com.github.wez.wezterm'",
+            ]
+        );
+    }
+
+    #[test]
+    fn open_tab_defaults_to_an_error() {
+        struct Bare;
+        impl TerminalBackend for Bare {
+            fn id(&self) -> &'static str {
+                "bare"
+            }
+            fn list(&self, _: &Ports) -> Result<Option<Vec<Tab>>> {
+                Ok(None)
+            }
+            fn focus(&self, _: &Ports, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn focus_tty(&self, _: &Ports, _: &str) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        let os = FakeOs::new(&log());
+        let p = os.ports();
+        assert!(Bare.list(&p).unwrap().is_none());
+        Bare.focus(&p, "x").unwrap();
+        assert!(!Bare.focus_tty(&p, "ttys1").unwrap());
+        let e = Bare.open_tab(&p, "/x", "y").unwrap_err();
+        assert_eq!(e.to_string(), "bare cannot open tabs");
+    }
+
+    #[test]
+    fn app_running_reads_the_jxa_answer() {
+        let os = FakeOs::new(&log())
+            .osa("true\n")
+            .osa("false")
+            .osa_fail("boom");
+        assert!(app_running(&os.ports(), "Ghostty"));
+        assert!(!app_running(&os.ports(), "Ghostty"));
+        assert!(!app_running(&os.ports(), "Ghostty"));
+        let s = os.scripts.borrow()[0].clone();
+        assert!(s.contains(r#"String(Application("Ghostty").running())"#));
+        assert!(s.contains("catch (e) { return \"false\"; }"));
+    }
+
+    #[test]
+    fn launch_opens_the_bundle_then_polls_until_ready() {
+        let l = log();
+        let os = FakeOs::new(&l).answer("open -b", "");
+        let polls = Cell::new(0);
+        let ready = |_: &Ports| {
+            polls.set(polls.get() + 1);
+            polls.get() == 3
+        };
+        launch(&os.ports(), &GHOSTTY, &ready).unwrap();
+        assert_eq!(
+            *l.borrow(),
+            [
+                "run:open -b com.mitchellh.ghostty",
+                "sleep:250",
+                "sleep:250",
+                "sleep:250"
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_gives_up_after_twenty_polls() {
+        let l = log();
+        let os = FakeOs::new(&l).answer("open -b", "");
+        let e = launch(&os.ports(), &WEZTERM, &|_| false).unwrap_err();
+        assert_eq!(e.to_string(), "WezTerm did not start");
+        let sleeps = l.borrow().iter().filter(|c| *c == "sleep:250").count();
+        assert_eq!(sleeps, LAUNCH_POLLS as usize);
+    }
+
+    #[test]
+    fn launch_reports_an_open_failure() {
+        let l = log();
+        let os = FakeOs::new(&l).fail("open -b", "open failed: no app");
+        let e = launch(&os.ports(), &ITERM2, &|_| true).unwrap_err();
+        assert_eq!(e.to_string(), "open failed: no app");
+        assert_eq!(l.borrow().len(), 1);
     }
 
     #[test]

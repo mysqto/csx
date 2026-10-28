@@ -1,7 +1,7 @@
 //! Ghostty terminal backend: lists terminals and focuses one by id, or by tty
 //! through a temporary title marker.
 
-use super::{write_tty, Ports, Tab, TerminalBackend};
+use super::{app_running, launch, write_tty, Ports, Tab, TerminalBackend, GHOSTTY};
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -87,6 +87,31 @@ fn focus_jxa(id: &str) -> String {
     )
 }
 
+/// Opens a tab in the front window, or a window when there is none, that
+/// starts in `cwd` and types `line` and a newline. The names come from
+/// Ghostty's scripting dictionary: `new surface configuration` with
+/// `initial working directory` and `initial input`, `new tab` with `in` and
+/// `with configuration`, `new window`, `front window`.
+fn open_jxa(cwd: &str, line: &str) -> String {
+    format!(
+        r#"(() => {{
+  const g = Application("Ghostty");
+  const c = g.newSurfaceConfiguration();
+  c.initialWorkingDirectory = {};
+  c.initialInput = {} + "\n";
+  if (g.windows().length > 0) {{
+    g.newTab({{in: g.frontWindow(), withConfiguration: c}});
+  }} else {{
+    g.newWindow({{withConfiguration: c}});
+  }}
+  g.activate();
+  return "ok";
+}})()"#,
+        lit(cwd),
+        lit(line)
+    )
+}
+
 fn entries(ports: &Ports) -> Result<Option<Vec<Entry>>> {
     let out = ports.osa.run_jxa(LIST_JXA)?;
     Ok(serde_json::from_str(out.trim())?)
@@ -151,11 +176,21 @@ impl TerminalBackend for Ghostty {
         }
         Ok(false)
     }
+
+    fn open_tab(&self, ports: &Ports, cwd: &str, line: &str) -> Result<()> {
+        let running = |p: &Ports| app_running(p, "Ghostty");
+        if !running(ports) {
+            launch(ports, &GHOSTTY, &running)?;
+        }
+        ports.osa.run_jxa(&open_jxa(cwd, line))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::test_support::{log, FakeOs};
     use crate::tabs::{CommandRunner, OsaRunner, Sleeper, TtyWriter};
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -370,6 +405,78 @@ mod tests {
         let r = Rig::new(&[SNAP]);
         assert!(Ghostty.focus_tty(&r.ports(), "../x").is_err());
         assert!(r.writes().is_empty());
+    }
+
+    /// A folder with a quote and a line with a quote, a double quote and
+    /// backslashes, as `resume_line` could build them.
+    const CWD: &str = "/Users/me/it's here";
+    const LINE: &str = r#"cd '/Users/me/it'\''s here' && echo "a\b""#;
+    /// `LINE` as a JXA string literal.
+    const LINE_LIT: &str = r#""cd '/Users/me/it'\\''s here' && echo \"a\\b\"""#;
+
+    #[test]
+    fn open_tab_in_running_ghostty_sends_one_escaped_script() {
+        let l = log();
+        let os = FakeOs::new(&l).osa("true").osa("ok");
+        Ghostty.open_tab(&os.ports(), CWD, LINE).unwrap();
+        assert_eq!(*l.borrow(), ["osa", "osa"]);
+        let s = os.scripts.borrow()[1].clone();
+        assert!(s.contains("const c = g.newSurfaceConfiguration();"), "{s}");
+        assert!(s.contains(r#"c.initialWorkingDirectory = "/Users/me/it's here";"#));
+        assert!(
+            s.contains(&format!(r#"c.initialInput = {LINE_LIT} + "\n";"#)),
+            "{s}"
+        );
+        assert!(s.contains("g.newTab({in: g.frontWindow(), withConfiguration: c});"));
+        assert!(s.contains("g.newWindow({withConfiguration: c});"));
+        assert!(s.contains("if (g.windows().length > 0)"));
+        assert!(s.contains("g.activate();"));
+    }
+
+    #[test]
+    fn open_tab_starts_ghostty_and_waits_for_it() {
+        let l = log();
+        let os = FakeOs::new(&l)
+            .answer("open -b", "")
+            .osa("false")
+            .osa("false")
+            .osa("true")
+            .osa("ok");
+        Ghostty.open_tab(&os.ports(), CWD, LINE).unwrap();
+        assert_eq!(
+            *l.borrow(),
+            [
+                "osa",
+                "run:open -b com.mitchellh.ghostty",
+                "sleep:250",
+                "osa",
+                "sleep:250",
+                "osa",
+                "osa"
+            ]
+        );
+        assert!(os.scripts.borrow()[3].contains("newSurfaceConfiguration"));
+    }
+
+    #[test]
+    fn open_tab_times_out_when_ghostty_does_not_start() {
+        let l = log();
+        // Every running() check answers "", which is not "true".
+        let os = FakeOs::new(&l).answer("open -b", "");
+        let e = Ghostty.open_tab(&os.ports(), CWD, LINE).unwrap_err();
+        assert_eq!(e.to_string(), "Ghostty did not start");
+        assert!(!os
+            .scripts
+            .borrow()
+            .iter()
+            .any(|s| s.contains("newSurfaceConfiguration")));
+    }
+
+    #[test]
+    fn open_tab_script_failure_is_an_error() {
+        let os = FakeOs::new(&log()).osa("true").osa_fail("not allowed");
+        let e = Ghostty.open_tab(&os.ports(), CWD, LINE).unwrap_err();
+        assert_eq!(e.to_string(), "not allowed");
     }
 
     #[test]

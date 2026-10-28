@@ -87,7 +87,7 @@ one real adapter.
 | `source/fileid.rs`  | Stable file keys, size/mtime.                                        | —                                       |
 | `index.rs`          | `sync` — the incremental indexer (watermarks, repo resolution).      | —                                       |
 | `refresh.rs`        | Stale-index check for `tabs --closed`: stamp and lock files, `maybe_refresh`. | consumes `Spawner`                      |
-| `refresh_shim.rs`   | `RealSpawner` (detached `csx sync` child process).                   | `Spawner` → **shim**                    |
+| `refresh_shim.rs`   | `RealSpawner` (detached `csx sync` child process in its own process group). | `Spawner` → **shim**             |
 | `repo.rs`           | Stable repo-id resolution from git output.                           | consumes `GitRunner`                    |
 | `git_shim.rs`       | Real `git` subprocess adapter.                                       | `GitRunner` → **shim**                  |
 | `output.rs`         | Pure `Format` (Human/JSON) rendering of every result type.           | —                                       |
@@ -104,11 +104,12 @@ one real adapter.
 | `rag.rs`            | `ChatClient` port, hybrid `retrieve`, cited prompt assembly, `RagEngine` (`AskEngine` impl). | consumes `ChatClient`, `Embedder` |
 | `chat_shim.rs`      | `AnthropicChat` — the Messages HTTP adapter.                         | `ChatClient` → **shim**                 |
 | `analyze.rs`        | Session analysis (`Analyzer`, entities, prompt hashing) + store.     | consumes `Embedder`/`ChatClient` ports  |
-| `tabs/mod.rs`       | Tab and agent types, the OS ports (`OsaRunner`, `CommandRunner`, `TtyWriter`, `Sleeper`), `TerminalBackend`, sorting and query matching. | defines the ports |
+| `tabs/mod.rs`       | Tab and agent types, the OS ports (`OsaRunner`, `CommandRunner`, `TtyWriter`, `Sleeper`), `TerminalBackend`, sorting and query matching; `TERMINALS`, `installed_terminals` (Spotlight by bundle id) and `launch` (start a terminal, poll until ready). | defines the ports |
 | `tabs/app.rs`       | The list pipeline (join tabs, tmux panes and agents) and `focus` routing by ref. | consumes the ports |
-| `tabs/ghostty.rs`, `iterm2.rs`, `terminal_app.rs`, `kitty.rs`, `wezterm.rs` | One `TerminalBackend` per terminal: build commands, parse output. | consume `OsaRunner` / `CommandRunner` |
+| `tabs/ghostty.rs`, `iterm2.rs`, `terminal_app.rs`, `kitty.rs`, `wezterm.rs` | One `TerminalBackend` per terminal: build commands, parse output, open a tab that types a line (`open_tab`). | consume `OsaRunner` / `CommandRunner` / `Sleeper` |
 | `tabs/tmux.rs`, `tabs/process.rs` | tmux panes nested under outer tabs; the `ps` process table. | consume `CommandRunner` |
 | `tabs/closed.rs`    | Closed sessions for `csx tabs --closed`: indexed sessions no detected agent runs, with title, last prompt and resume command. | — (reads the index and transcripts under a root) |
+| `tabs/open.rs`      | `csx tabs open`: look the session up in the index, check folder and id, focus the tab that already runs it, else `open_tab` with the resume line. | consumes the ports |
 | `tabs/render.rs`    | Pure human, JSON and Alfred rendering of a `TabsReport`.              | —                                       |
 | `tabs/os_shim.rs`   | `RealOsa`, `RealCommand`, `RealTty`, `RealSleeper`.                   | tab ports → **shim**                    |
 | `agent/*`           | `Agent` trait, `registry()`, `detect`; `claude.rs`, `codex.rs`, `generic.rs` (process-name agents). | consume `ProcessTable`   |

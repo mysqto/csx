@@ -1,7 +1,7 @@
 //! WezTerm terminal backend, built from documentation: `wezterm cli list
 //! --format json` lists panes and `wezterm cli activate-pane` focuses one.
 
-use super::{Ports, Tab, TerminalBackend};
+use super::{launch, Ports, Tab, TerminalBackend, WEZTERM};
 use crate::error::{Error, Result};
 use serde::Deserialize;
 
@@ -115,6 +115,14 @@ impl WezTerm {
         parse_panes(&out).map(Some)
     }
 
+    /// `wezterm cli` with `--no-auto-start`, so that it never starts a
+    /// hidden mux server in place of the app.
+    fn cli(ports: &Ports, sub: &[&str]) -> Result<String> {
+        let mut args = vec!["cli", "--no-auto-start"];
+        args.extend(sub);
+        ports.cmd.run("wezterm", &args)
+    }
+
     fn focus_pane(&self, ports: &Ports, pane_id: u64) -> Result<()> {
         let id = pane_id.to_string();
         ports
@@ -166,6 +174,23 @@ impl TerminalBackend for WezTerm {
             Some(p) => self.focus_pane(ports, p.pane_id).map(|_| true),
             None => Ok(false),
         }
+    }
+
+    /// `wezterm cli spawn --cwd <cwd>` prints the new pane's id; `send-text
+    /// --no-paste` then types `line` and a newline into it.
+    fn open_tab(&self, ports: &Ports, cwd: &str, line: &str) -> Result<()> {
+        if ports.cmd.run("pgrep", &["-x", "wezterm-gui"]).is_err() {
+            launch(ports, &WEZTERM, &|p| Self::cli(p, &["list"]).is_ok())?;
+        }
+        let out = Self::cli(ports, &["spawn", "--cwd", cwd])?;
+        let id: u64 = out.trim().parse().map_err(|_| {
+            Error::other(format!("wezterm: unexpected spawn output: {}", out.trim()))
+        })?;
+        let id = id.to_string();
+        let text = format!("{line}\n");
+        Self::cli(ports, &["send-text", "--no-paste", "--pane-id", &id, &text])?;
+        ports.osa.run_jxa(r#"Application("WezTerm").activate()"#)?;
+        Ok(())
     }
 }
 
@@ -356,6 +381,143 @@ mod tests {
         assert!(!r.unwrap());
         assert_eq!(calls.len(), 2);
         assert!(osa.is_empty());
+    }
+
+    /// A folder with a quote and a line with a quote, a double quote and
+    /// backslashes, as `resume_line` could build them.
+    const CWD: &str = "/Users/me/it's here";
+    const LINE: &str = r#"cd '/Users/me/it'\''s here' && echo "a\b""#;
+
+    /// WezTerm whose GUI runs when `running`. `wezterm cli list` works from
+    /// the `ready_at`-th call on (0: never), `spawn` answers `spawn_out`, and
+    /// any command line that contains `fail` fails.
+    struct OpenCmd {
+        running: bool,
+        ready_at: usize,
+        spawn_out: &'static str,
+        fail: &'static str,
+        lists: std::cell::Cell<usize>,
+        calls: RefCell<Vec<String>>,
+    }
+    impl CommandRunner for OpenCmd {
+        fn run(&self, program: &str, args: &[&str]) -> Result<String> {
+            let line = format!("{program} {}", args.join(" "));
+            self.calls.borrow_mut().push(line.clone());
+            if !self.fail.is_empty() && line.contains(self.fail) {
+                return Err(Error::other("refused"));
+            }
+            if program == "pgrep" && !self.running {
+                return Err(Error::other("exit 1"));
+            }
+            if args.contains(&"list") {
+                self.lists.set(self.lists.get() + 1);
+                if self.ready_at == 0 || self.lists.get() < self.ready_at {
+                    return Err(Error::other("no gui"));
+                }
+            }
+            Ok(if args.contains(&"spawn") {
+                self.spawn_out.into()
+            } else {
+                String::new()
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Sleeps(RefCell<Vec<u64>>);
+    impl Sleeper for Sleeps {
+        fn sleep_ms(&self, ms: u64) {
+            self.0.borrow_mut().push(ms);
+        }
+    }
+
+    fn open_cmd(
+        running: bool,
+        ready_at: usize,
+        spawn_out: &'static str,
+        fail: &'static str,
+    ) -> OpenCmd {
+        OpenCmd {
+            running,
+            ready_at,
+            spawn_out,
+            fail,
+            lists: std::cell::Cell::new(0),
+            calls: RefCell::new(vec![]),
+        }
+    }
+
+    /// Open a tab; the result, the command lines and the sleeps.
+    fn open_with(cmd: OpenCmd, osa: &dyn OsaRunner) -> (Result<()>, Vec<String>, Vec<u64>) {
+        let sleeps = Sleeps::default();
+        let ports = Ports {
+            osa,
+            cmd: &cmd,
+            tty: &NoTty,
+            sleep: &sleeps,
+        };
+        let r = WezTerm.open_tab(&ports, CWD, LINE);
+        (r, cmd.calls.into_inner(), sleeps.0.into_inner())
+    }
+
+    #[test]
+    fn open_tab_spawns_a_pane_then_sends_the_line() {
+        let osa = Osa(RefCell::new(vec![]));
+        let (r, calls, sleeps) = open_with(open_cmd(true, 1, "7\n", ""), &osa);
+        r.unwrap();
+        assert_eq!(
+            calls,
+            [
+                "pgrep -x wezterm-gui".to_string(),
+                "wezterm cli --no-auto-start spawn --cwd /Users/me/it's here".to_string(),
+                format!("wezterm cli --no-auto-start send-text --no-paste --pane-id 7 {LINE}\n"),
+            ]
+        );
+        assert!(sleeps.is_empty());
+        assert_eq!(*osa.0.borrow(), [r#"Application("WezTerm").activate()"#]);
+    }
+
+    #[test]
+    fn open_tab_starts_wezterm_and_waits_for_its_cli() {
+        let osa = Osa(RefCell::new(vec![]));
+        let (r, calls, sleeps) = open_with(open_cmd(false, 2, "7", ""), &osa);
+        r.unwrap();
+        assert_eq!(
+            &calls[..4],
+            [
+                "pgrep -x wezterm-gui",
+                "open -b com.github.wez.wezterm",
+                "wezterm cli --no-auto-start list",
+                "wezterm cli --no-auto-start list"
+            ]
+        );
+        assert!(calls[4].contains(" spawn ") && calls[5].contains(" send-text "));
+        assert_eq!(sleeps, [250, 250]);
+    }
+
+    #[test]
+    fn open_tab_errors() {
+        let osa = Osa(RefCell::new(vec![]));
+        // It never starts.
+        let (r, calls, sleeps) = open_with(open_cmd(false, 0, "7", ""), &osa);
+        assert_eq!(r.unwrap_err().to_string(), "WezTerm did not start");
+        assert_eq!(sleeps.len(), 20);
+        assert!(!calls.iter().any(|c| c.contains("spawn")));
+        // spawn fails, or answers something that is not a pane id.
+        let (r, _, _) = open_with(open_cmd(true, 1, "7", "spawn"), &osa);
+        assert_eq!(r.unwrap_err().to_string(), "refused");
+        let (r, _, _) = open_with(open_cmd(true, 1, "pane?\n", ""), &osa);
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "wezterm: unexpected spawn output: pane?"
+        );
+        // send-text fails.
+        let (r, _, _) = open_with(open_cmd(true, 1, "7", "send-text"), &osa);
+        assert_eq!(r.unwrap_err().to_string(), "refused");
+        assert!(osa.0.borrow().is_empty());
+        // Activation fails.
+        let (r, _, _) = open_with(open_cmd(true, 1, "7", ""), &FailOsa);
+        assert_eq!(r.unwrap_err().to_string(), "osa");
     }
 
     #[test]

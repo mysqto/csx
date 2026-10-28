@@ -4,7 +4,7 @@
 //! installed on the development machine, so the script shape has not been
 //! checked against a live app.
 
-use super::{Ports, Tab, TerminalBackend};
+use super::{app_running, launch, Ports, Tab, TerminalBackend, ITERM2};
 use crate::error::{Error, Result};
 use serde::Deserialize;
 
@@ -77,6 +77,28 @@ fn focus_script(session_id: &str) -> Result<String> {
     ))
 }
 
+/// Opens a tab in the current window, or a window when there is none, and
+/// writes `line` to its session; `write text` ends it with a newline.
+fn open_script(line: &str) -> String {
+    // Serializing a string cannot fail.
+    let line = serde_json::to_string(line).unwrap_or_default();
+    format!(
+        r#"(() => {{
+  const app = Application("iTerm2");
+  const w = app.windows().length > 0 ? app.currentWindow() : null;
+  let s;
+  if (w) {{
+    s = w.createTabWithDefaultProfile().currentSession();
+  }} else {{
+    s = app.createWindowWithDefaultProfile().currentSession();
+  }}
+  s.write({{text: {line}}});
+  app.activate();
+  return "ok";
+}})()"#
+    )
+}
+
 fn strip_dev(tty: &str) -> Option<String> {
     let t = tty.strip_prefix("/dev/").unwrap_or(tty);
     (!t.is_empty()).then(|| t.to_string())
@@ -134,11 +156,21 @@ impl TerminalBackend for ITerm2 {
             None => Ok(false),
         }
     }
+
+    fn open_tab(&self, ports: &Ports, _cwd: &str, line: &str) -> Result<()> {
+        let running = |p: &Ports| app_running(p, "iTerm2");
+        if !running(ports) {
+            launch(ports, &ITERM2, &running)?;
+        }
+        ports.osa.run_jxa(&open_script(line))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::test_support::{log, FakeOs};
     use crate::tabs::{CommandRunner, OsaRunner, Sleeper, TtyWriter};
     use std::cell::RefCell;
 
@@ -280,5 +312,62 @@ mod tests {
         let osa = Osa::new(&["not json", "oops"]);
         assert!(ITerm2.list(&ports(&osa)).is_err());
         assert!(ITerm2.focus(&ports(&osa), "iterm2:S-1").is_err());
+    }
+
+    /// A folder with a quote and a line with a quote, a double quote and
+    /// backslashes, as `resume_line` could build them.
+    const CWD: &str = "/Users/me/it's here";
+    const LINE: &str = r#"cd '/Users/me/it'\''s here' && echo "a\b""#;
+    /// `LINE` as a JXA string literal.
+    const LINE_LIT: &str = r#""cd '/Users/me/it'\\''s here' && echo \"a\\b\"""#;
+
+    #[test]
+    fn open_tab_in_running_iterm2_writes_the_line() {
+        let l = log();
+        let os = FakeOs::new(&l).osa("true").osa("ok");
+        ITerm2.open_tab(&os.ports(), CWD, LINE).unwrap();
+        assert_eq!(*l.borrow(), ["osa", "osa"]);
+        let s = os.scripts.borrow()[1].clone();
+        assert!(s.contains(r#"const app = Application("iTerm2");"#), "{s}");
+        assert!(s.contains("const w = app.windows().length > 0 ? app.currentWindow() : null;"));
+        assert!(s.contains("s = w.createTabWithDefaultProfile().currentSession();"));
+        assert!(s.contains("s = app.createWindowWithDefaultProfile().currentSession();"));
+        assert!(
+            s.contains(&format!("s.write({{text: {LINE_LIT}}});")),
+            "{s}"
+        );
+        assert!(s.contains("app.activate();"));
+    }
+
+    #[test]
+    fn open_tab_starts_iterm2_and_waits_for_it() {
+        let l = log();
+        let os = FakeOs::new(&l)
+            .answer("open -b", "")
+            .osa("false")
+            .osa("true")
+            .osa("ok");
+        ITerm2.open_tab(&os.ports(), CWD, LINE).unwrap();
+        assert_eq!(
+            *l.borrow(),
+            [
+                "osa",
+                "run:open -b com.googlecode.iterm2",
+                "sleep:250",
+                "osa",
+                "osa"
+            ]
+        );
+        assert!(os.scripts.borrow()[0].contains(r#"Application("iTerm2").running()"#));
+    }
+
+    #[test]
+    fn open_tab_errors_when_iterm2_does_not_start_or_refuses() {
+        let os = FakeOs::new(&log()).answer("open -b", "");
+        let e = ITerm2.open_tab(&os.ports(), CWD, LINE).unwrap_err();
+        assert_eq!(e.to_string(), "iTerm2 did not start");
+        let os = FakeOs::new(&log()).osa("true").osa_fail("not allowed");
+        let e = ITerm2.open_tab(&os.ports(), CWD, LINE).unwrap_err();
+        assert_eq!(e.to_string(), "not allowed");
     }
 }

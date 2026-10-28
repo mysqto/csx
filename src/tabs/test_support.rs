@@ -6,7 +6,7 @@ use super::{AgentInfo, CommandRunner, OsaRunner, Ports, Sleeper, Tab, TerminalBa
 use crate::agent::{Agent, AgentContext};
 use crate::error::{Error, Result};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -20,10 +20,13 @@ pub(crate) fn log() -> Log {
 }
 
 /// OS ports. `run` answers by `"<program> <first arg>"` from `answers`; a
-/// missing key is an error. Every call is logged.
+/// missing key is an error. `run_jxa` records the script and answers from
+/// `osa_answers` in order, then with `""`. Every call is logged.
 pub(crate) struct FakeOs {
     pub log: Log,
     pub answers: HashMap<String, std::result::Result<String, String>>,
+    pub osa_answers: RefCell<VecDeque<std::result::Result<String, String>>>,
+    pub scripts: RefCell<Vec<String>>,
 }
 
 impl FakeOs {
@@ -31,7 +34,21 @@ impl FakeOs {
         FakeOs {
             log: log.clone(),
             answers: HashMap::new(),
+            osa_answers: RefCell::new(VecDeque::new()),
+            scripts: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Answer the next unanswered JXA run with `out`.
+    pub fn osa(self, out: &str) -> Self {
+        self.osa_answers.borrow_mut().push_back(Ok(out.into()));
+        self
+    }
+
+    /// Fail the next unanswered JXA run with `err`.
+    pub fn osa_fail(self, err: &str) -> Self {
+        self.osa_answers.borrow_mut().push_back(Err(err.into()));
+        self
     }
 
     /// Answer `key` (`"<program> <first arg>"`) with `out`.
@@ -71,9 +88,14 @@ impl CommandRunner for FakeOs {
 }
 
 impl OsaRunner for FakeOs {
-    fn run_jxa(&self, _script: &str) -> Result<String> {
+    fn run_jxa(&self, script: &str) -> Result<String> {
         self.log.borrow_mut().push("osa".into());
-        Ok(String::new())
+        self.scripts.borrow_mut().push(script.into());
+        match self.osa_answers.borrow_mut().pop_front() {
+            Some(Ok(out)) => Ok(out),
+            Some(Err(e)) => Err(Error::other(e)),
+            None => Ok(String::new()),
+        }
     }
 }
 
@@ -105,6 +127,7 @@ pub(crate) struct FakeBackend {
     pub listing: Listing,
     pub shows: Vec<&'static str>,
     pub tty_error: bool,
+    pub open_error: bool,
     pub log: Log,
 }
 
@@ -115,6 +138,7 @@ impl FakeBackend {
             listing: Listing::NotRunning,
             shows: Vec::new(),
             tty_error: false,
+            open_error: false,
             log: log.clone(),
         }
     }
@@ -138,6 +162,12 @@ impl FakeBackend {
     /// `focus_tty` returns an error.
     pub fn tty_error(mut self) -> Self {
         self.tty_error = true;
+        self
+    }
+
+    /// `open_tab` returns an error.
+    pub fn open_error(mut self) -> Self {
+        self.open_error = true;
         self
     }
 
@@ -174,6 +204,16 @@ impl TerminalBackend for FakeBackend {
             return Err(Error::other("refused"));
         }
         Ok(self.shows.contains(&tty))
+    }
+
+    fn open_tab(&self, _ports: &Ports, cwd: &str, line: &str) -> Result<()> {
+        self.log
+            .borrow_mut()
+            .push(format!("open:{}:{cwd}:{line}", self.id));
+        if self.open_error {
+            return Err(Error::other("cannot script"));
+        }
+        Ok(())
     }
 }
 
@@ -262,6 +302,12 @@ mod tests {
         assert_eq!(p.cmd.run("tmux", &["ls"]).unwrap_err().to_string(), "no");
         assert!(p.cmd.run("kitten", &[]).is_err());
         assert!(p.osa.run_jxa("s").unwrap().is_empty());
+        let scripted = FakeOs::new(&log()).osa("yes").osa_fail("no");
+        let sp = scripted.ports();
+        assert_eq!(sp.osa.run_jxa("a").unwrap(), "yes");
+        assert_eq!(sp.osa.run_jxa("b").unwrap_err().to_string(), "no");
+        assert_eq!(sp.osa.run_jxa("c").unwrap(), "");
+        assert_eq!(*scripted.scripts.borrow(), ["a", "b", "c"]);
         p.tty.write("ttys1", b"x").unwrap();
         p.sleep.sleep_ms(5);
         assert_eq!(
