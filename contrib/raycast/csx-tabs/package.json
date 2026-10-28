@@ -28,14 +28,14 @@
     {
       "name": "search-ai-sessions",
       "title": "Search AI Sessions",
-      "subtitle": "csx",
-      "description": "List the terminal tabs that run an AI coding agent, such as Claude Code, Codex or Devin, and focus one.",
+      "subtitle": "CSX",
+      "description": "List the terminal tabs that run an AI coding agent, such as Claude Code, Codex or Gemini CLI, and focus one.",
       "mode": "view"
     },
     {
       "name": "search-terminal-tabs",
       "title": "Search Terminal Tabs",
-      "subtitle": "csx",
+      "subtitle": "CSX",
       "description": "List every terminal tab and focus one.",
       "mode": "view"
     }
@@ -43,7 +43,7 @@
   "preferences": [
     {
       "name": "csxPath",
-      "title": "csx Path",
+      "title": "CSX Path",
       "description": "Full path to the csx binary. Leave empty to look in the Homebrew, MacPorts and Cargo folders.",
       "type": "textfield",
       "required": false,
@@ -65,7 +65,7 @@
   },
   "devDependencies": {
     "@raycast/eslint-config": "^2.2.0",
-    "@types/node": "^26.6.5",
+    "@types/node": "^22.20.5",
     "@types/react": "^19.3.0",
     "eslint": "^10.13.0",
     "prettier": "^3.9.10",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   cut,
@@ -131,7 +132,8 @@ test("terminal and tool names", () => {
   assert.equal(terminalName("alacritty"), "alacritty");
   assert.equal(toolName("claude-code"), "Claude Code");
   assert.equal(toolName("devin"), "Devin");
-  assert.equal(toolName("aider"), "aider");
+  assert.equal(toolName("cursor-agent"), "Cursor Agent");
+  assert.equal(toolName("new-agent"), "new-agent");
 });
 
 test("rowPrompt flattens and cuts the last prompt", () => {
@@ -150,12 +152,23 @@ test("rowKeywords cover terminal, cwd, tool, session and prompt", () => {
     assert.ok(kw.includes(w), w);
   }
   assert.ok(!kw.includes(""));
+  assert.ok(kw.includes("acme"), "folder name");
+  assert.equal(new Set(kw).size, kw.length);
   assert.deepEqual(rowKeywords(p), ["iterm2", "iTerm2", "zsh"]);
 });
 
 test("rowKey uses the ref, else a fallback that stays unique", () => {
   const [a, p] = parseReport(report([agentRow, plainRow])).rows;
-  assert.equal(rowKey(a, 0), "ghostty:AB-1");
-  assert.equal(rowKey({ ...a, ref: null }, 4), "ghostty:42:4");
-  assert.equal(rowKey({ ...p, ref: null }, 5), "iterm2::5");
+  assert.equal(rowKey(a, 0), "ghostty:AB-1#0");
+  assert.notEqual(rowKey(a, 0), rowKey(a, 1));
+  assert.equal(rowKey({ ...a, ref: null }, 4), "ghostty:42#4");
+  assert.equal(rowKey({ ...p, ref: null }, 5), "iterm2:#5");
+});
+
+test("parseReport reads the shared fixture that the csx Rust tests also check", () => {
+  const text = readFileSync("test/fixtures/report.json", "utf8");
+  const r = parseReport(text);
+  assert.deepEqual(r, JSON.parse(text));
+  assert.equal(rowTitle(r.rows[2]), "gemini");
+  assert.equal(rowKey(r.rows[2], 2), "tty:ttys009#2");
 });

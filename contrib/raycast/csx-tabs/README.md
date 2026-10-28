@@ -5,17 +5,18 @@ The extension supports Ghostty, iTerm2, Terminal, kitty, WezTerm and tmux.
 
 ## Commands
 
-- Search AI Sessions lists the tabs that run Claude Code, Codex, Devin, Cursor Agent or another AI coding agent. Each row shows the session title, folder, last prompt and whether the agent is busy or idle.
+- Search AI Sessions lists the tabs that run Claude Code, Codex, Gemini CLI, Cursor Agent or another AI coding agent. Each row shows the session title, folder, last prompt and whether the agent is busy or idle.
 - Search Terminal Tabs lists every terminal tab.
 
 Press Return to bring the tab to the front. The Action Panel can also copy the command that resumes the session, the session ID or the folder.
 
 ## Setup
 
-The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew:
+The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew. Recent Homebrew versions load a cask from a third-party tap only after `brew trust`:
 
 ```sh
 brew tap mysqto/csx https://github.com/mysqto/csx
+brew trust mysqto/csx
 brew install --cask csx
 ```
 

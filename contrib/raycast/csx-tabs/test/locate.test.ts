@@ -27,15 +27,25 @@ test("csxCandidates ignores an empty preference", () => {
 test("extendedPath adds install folders once, before the old PATH", () => {
   const p = extendedPath("/Users/me", "/usr/bin:/opt/homebrew/bin:/x");
   const parts = p.split(":");
-  assert.equal(parts[0], "/opt/homebrew/bin");
+  assert.deepEqual(parts.slice(0, 5), ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin"]);
   assert.ok(parts.includes("/x"));
   assert.equal(parts.filter((d) => d === "/opt/homebrew/bin").length, 1);
   assert.equal(parts.filter((d) => d === "/usr/bin").length, 1);
 });
 
 test("extendedPath works without a PATH", () => {
-  assert.ok(extendedPath("/Users/me", undefined).endsWith("/usr/bin:/bin:/usr/sbin:/sbin"));
+  assert.ok(extendedPath("/Users/me", undefined).endsWith("/Users/me/.local/bin"));
   assert.ok(!extendedPath("/Users/me", "").includes("::"));
+});
+
+test("describeFailure explains a timeout first", () => {
+  assert.match(describeFailure("error: boom", "Command failed", true), /did not answer.*Automation|allow it/);
+});
+
+test("describeFailure explains an old csx from the real clap output", () => {
+  const clap =
+    "error: unrecognized subcommand 'tabs'\n\n  tip: a similar subcommand exists: 'sync'\n\nUsage: csx [OPTIONS] [COMMAND]\n\nFor more information, try '--help'.\n";
+  assert.match(describeFailure(clap, "x"), /Update csx to 0\.2\.0/);
 });
 
 test("describeFailure explains an old csx", () => {

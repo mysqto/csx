@@ -1,10 +1,11 @@
 import { homedir } from "node:os";
 import { Action, ActionPanel, closeMainWindow, Color, Icon, Keyboard, List, showHUD } from "@raycast/api";
-import { usePromise } from "@raycast/utils";
+import { showFailureToast, usePromise } from "@raycast/utils";
 import { CsxMissingError, focusTab, listTabs } from "./lib/csx";
 import { Row, rowCwd, rowKey, rowKeywords, rowPrompt, rowTitle, shortenHome, terminalName, toolName } from "./lib/rows";
 
-const INSTALL_COMMAND = "brew tap mysqto/csx https://github.com/mysqto/csx && brew install --cask csx";
+const INSTALL_COMMAND =
+  "brew tap mysqto/csx https://github.com/mysqto/csx && brew trust mysqto/csx && brew install --cask csx";
 const HOME = homedir();
 
 async function focus(ref: string) {
@@ -113,7 +114,10 @@ function ErrorView({ error, reload }: { error: Error; reload: () => void }) {
 
 export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
   const { data, error, isLoading, revalidate } = usePromise(listTabs, [agentsOnly], {
-    failureToastOptions: { title: "csx failed" },
+    // The empty view explains a missing csx, so only other errors get a toast.
+    onError: (e) => {
+      if (!(e instanceof CsxMissingError)) showFailureToast(e, { title: "csx failed" });
+    },
   });
   const rows = data?.rows ?? [];
   const warnings = data?.warnings ?? [];

@@ -33,7 +33,7 @@ function run(args: string[], timeout: number): Promise<string> {
   const env = { ...process.env, PATH: extendedPath(homedir(), process.env.PATH) };
   return new Promise((resolve, reject) => {
     execFile(bin, args, { env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(describeFailure(String(stderr), err.message)));
+      if (err) reject(new Error(describeFailure(String(stderr), err.message, err.killed)));
       else resolve(String(stdout));
     });
   });
@@ -42,7 +42,7 @@ function run(args: string[], timeout: number): Promise<string> {
 /** List tabs; only those that run an agent when `agentsOnly`. */
 export async function listTabs(agentsOnly: boolean): Promise<Report> {
   const args = ["tabs", "--json", ...(agentsOnly ? ["--agents"] : [])];
-  return parseReport(await run(args, 20_000));
+  return parseReport(await run(args, 60_000));
 }
 
 /** Bring the tab named by `ref` to the front. */

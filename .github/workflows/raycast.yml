@@ -7,6 +7,9 @@ on:
   pull_request:
     paths: ["contrib/raycast/**", ".github/workflows/raycast.yml"]
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: macos-latest
@@ -23,5 +26,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - run: npx eslint src
+      - run: npx tsc -p tsconfig.json
+      - run: npx eslint src test
       - run: npx prettier --check .

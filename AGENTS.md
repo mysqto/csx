@@ -114,9 +114,12 @@ one real adapter.
 
 `contrib/raycast/csx-tabs/` is a separate TypeScript project, the Raycast
 extension. It runs `csx tabs --json` and `csx tabs focus -- <ref>`, so the
-JSON row shape is its contract: if you rename or remove a field in
-`tabs/mod.rs`, update `src/lib/rows.ts` there too. Its checks are
-`npm run build`, `npm test` and `npx eslint src`, run in that folder.
+JSON row shape is its contract. `test/fixtures/report.json` there holds one
+report, and both `render_json_matches_raycast_fixture` in `tabs/render.rs` and
+the extension tests check it. If you rename or remove a field in
+`tabs/mod.rs`, update the fixture and `src/lib/rows.ts` together. Its checks
+are `npm run build`, `npm test`, `npx eslint src test` and
+`npx prettier --check .`, run in that folder.
 
 Data flow: **sources → `index::sync` → `Db` (FTS5/trigram + `embeddings`
 BLOBs) → `search` / `rag::retrieve` → `output` / `AskEngine` → CLI, daemon, or

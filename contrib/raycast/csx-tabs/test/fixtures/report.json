@@ -1,0 +1,57 @@
+{
+  "rows": [
+    {
+      "terminal": "ghostty",
+      "ref": "ghostty:AB-1",
+      "title": "✳ fix login",
+      "cwd": "/Users/me/work/acme",
+      "tty": null,
+      "window": 1,
+      "index": 3,
+      "agent": {
+        "tool": "claude-code",
+        "pid": 42,
+        "tty": "ttys001",
+        "cwd": "/Users/me/work/acme",
+        "session_id": "0f1e2d3c",
+        "title": "Fix login",
+        "last_prompt": "run the tests",
+        "status": "busy",
+        "updated_at": 1793156134829,
+        "resume_command": "cd '/Users/me/work/acme' && claude --resume 0f1e2d3c"
+      }
+    },
+    {
+      "terminal": "iterm2",
+      "ref": "iterm2:w0t1p0",
+      "title": "zsh",
+      "cwd": null,
+      "tty": "ttys004",
+      "window": 2,
+      "index": 1,
+      "agent": null
+    },
+    {
+      "terminal": "",
+      "ref": "tty:ttys009",
+      "title": "",
+      "cwd": "/srv/app",
+      "tty": "ttys009",
+      "window": 0,
+      "index": 0,
+      "agent": {
+        "tool": "gemini",
+        "pid": 7,
+        "tty": "ttys009",
+        "cwd": "/srv/app",
+        "session_id": null,
+        "title": null,
+        "last_prompt": null,
+        "status": "unknown",
+        "updated_at": null,
+        "resume_command": null
+      }
+    }
+  ],
+  "warnings": ["kitty: remote control is off"]
+}

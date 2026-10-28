@@ -478,4 +478,64 @@ mod tests {
         let empty: Value = serde_json::from_str(&render_json(&TabsReport::default())).unwrap();
         assert_eq!(empty, serde_json::json!({"rows": [], "warnings": []}));
     }
+
+    /// The Raycast extension parses this same file, so a renamed or removed
+    /// field fails here before it breaks the extension.
+    #[test]
+    fn render_json_matches_raycast_fixture() {
+        let s = |v: &str| Some(v.to_string());
+        let claude = Tab {
+            terminal: "ghostty".into(),
+            ref_: s("ghostty:AB-1"),
+            title: "✳ fix login".into(),
+            cwd: s("/Users/me/work/acme"),
+            tty: None,
+            window: 1,
+            index: 3,
+            agent: Some(AgentInfo {
+                tool: "claude-code".into(),
+                pid: 42,
+                tty: s("ttys001"),
+                cwd: s("/Users/me/work/acme"),
+                session_id: s("0f1e2d3c"),
+                title: s("Fix login"),
+                last_prompt: s("run the tests"),
+                status: AgentStatus::Busy,
+                updated_at: Some(1_793_156_134_829),
+                resume_command: s("cd '/Users/me/work/acme' && claude --resume 0f1e2d3c"),
+            }),
+        };
+        let plain = Tab {
+            terminal: "iterm2".into(),
+            ref_: s("iterm2:w0t1p0"),
+            title: "zsh".into(),
+            tty: s("ttys004"),
+            window: 2,
+            index: 1,
+            ..Tab::default()
+        };
+        let tabless = Tab {
+            ref_: s("tty:ttys009"),
+            cwd: s("/srv/app"),
+            tty: s("ttys009"),
+            agent: Some(AgentInfo {
+                tool: "gemini".into(),
+                pid: 7,
+                tty: s("ttys009"),
+                cwd: s("/srv/app"),
+                ..AgentInfo::default()
+            }),
+            ..Tab::default()
+        };
+        let got: Value = serde_json::from_str(&render_json(&report(
+            vec![claude, plain, tabless],
+            &["kitty: remote control is off"],
+        )))
+        .unwrap();
+        let want: Value = serde_json::from_str(include_str!(
+            "../../contrib/raycast/csx-tabs/test/fixtures/report.json"
+        ))
+        .unwrap();
+        assert_eq!(got, want);
+    }
 }

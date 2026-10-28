@@ -47,6 +47,16 @@ const TOOL_NAMES: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   devin: "Devin",
+  gemini: "Gemini CLI",
+  opencode: "opencode",
+  copilot: "Copilot CLI",
+  "cursor-agent": "Cursor Agent",
+  aider: "Aider",
+  qwen: "Qwen Code",
+  goose: "Goose",
+  amp: "Amp",
+  crush: "Crush",
+  droid: "Droid",
 };
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -149,16 +159,20 @@ export function rowPrompt(r: Row): string | null {
   return p ? cut(p, PROMPT_MAX) : null;
 }
 
-/** Words Raycast matches the search text against, besides the title. */
+/** Words Raycast matches the search text against, besides the title.
+ * Raycast matches a keyword from its start, so the cwd also goes in as its
+ * folder names. */
 export function rowKeywords(r: Row): string[] {
-  const words = [r.terminal, terminalName(r.terminal), r.title, rowCwd(r) ?? ""];
+  const cwd = rowCwd(r) ?? "";
+  const words = [r.terminal, terminalName(r.terminal), r.title, cwd, ...cwd.split("/")];
   if (r.agent) {
     words.push(r.agent.tool, toolName(r.agent.tool), r.agent.session_id ?? "", r.agent.last_prompt ?? "");
   }
-  return words.flatMap((w) => oneLine(w).split(" ")).filter(Boolean);
+  return [...new Set(words.flatMap((w) => oneLine(w).split(" ")).filter(Boolean))];
 }
 
-/** A stable list key, also for rows without a ref. */
+/** A list key that stays unique when two rows share a ref, such as two
+ * agents on one tty. */
 export function rowKey(r: Row, i: number): string {
-  return r.ref ?? `${r.terminal}:${r.agent?.pid ?? ""}:${i}`;
+  return `${r.ref ?? `${r.terminal}:${r.agent?.pid ?? ""}`}#${i}`;
 }
