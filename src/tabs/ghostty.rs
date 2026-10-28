@@ -88,7 +88,7 @@ fn focus_jxa(id: &str) -> String {
 }
 
 /// Opens a tab in the front window, or a window when there is none, that
-/// starts in `cwd` and types `line` and a newline. The names come from
+/// starts in `cwd` and types `line` and a return. The names come from
 /// Ghostty's scripting dictionary: `new surface configuration` with
 /// `initial working directory` and `initial input`, `new tab` with `in` and
 /// `with configuration`, `new window`, `front window`.
@@ -98,7 +98,7 @@ fn open_jxa(cwd: &str, line: &str) -> String {
   const g = Application("Ghostty");
   const c = g.newSurfaceConfiguration();
   c.initialWorkingDirectory = {};
-  c.initialInput = {} + "\n";
+  c.initialInput = {} + "\r";
   if (g.windows().length > 0) {{
     g.newTab({{in: g.frontWindow(), withConfiguration: c}});
   }} else {{
@@ -424,7 +424,7 @@ mod tests {
         assert!(s.contains("const c = g.newSurfaceConfiguration();"), "{s}");
         assert!(s.contains(r#"c.initialWorkingDirectory = "/Users/me/it's here";"#));
         assert!(
-            s.contains(&format!(r#"c.initialInput = {LINE_LIT} + "\n";"#)),
+            s.contains(&format!(r#"c.initialInput = {LINE_LIT} + "\r";"#)),
             "{s}"
         );
         assert!(s.contains("g.newTab({in: g.frontWindow(), withConfiguration: c});"));

@@ -263,7 +263,7 @@ pub trait TerminalBackend {
     fn focus(&self, ports: &Ports, tab_ref: &str) -> Result<()>;
     /// Focus the tab that owns `tty`. `Ok(false)` when this app has no such tab.
     fn focus_tty(&self, ports: &Ports, tty: &str) -> Result<bool>;
-    /// Open a new tab in `cwd`, type `line` and a newline into it, and bring
+    /// Open a new tab in `cwd`, type `line` and a return into it, and bring
     /// the app to the front. Starts the app when it is not running.
     fn open_tab(&self, _ports: &Ports, _cwd: &str, _line: &str) -> Result<()> {
         Err(crate::error::Error::other(format!(

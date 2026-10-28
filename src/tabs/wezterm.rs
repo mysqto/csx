@@ -177,7 +177,7 @@ impl TerminalBackend for WezTerm {
     }
 
     /// `wezterm cli spawn --cwd <cwd>` prints the new pane's id; `send-text
-    /// --no-paste` then types `line` and a newline into it.
+    /// --no-paste` then types `line` and a return into it.
     fn open_tab(&self, ports: &Ports, cwd: &str, line: &str) -> Result<()> {
         if ports.cmd.run("pgrep", &["-x", "wezterm-gui"]).is_err() {
             launch(ports, &WEZTERM, &|p| Self::cli(p, &["list"]).is_ok())?;
@@ -187,7 +187,8 @@ impl TerminalBackend for WezTerm {
             Error::other(format!("wezterm: unexpected spawn output: {}", out.trim()))
         })?;
         let id = id.to_string();
-        let text = format!("{line}\n");
+        // A return, as the Enter key sends; a newline depends on the shell.
+        let text = format!("{line}\r");
         Self::cli(ports, &["send-text", "--no-paste", "--pane-id", &id, &text])?;
         ports.osa.run_jxa(r#"Application("WezTerm").activate()"#)?;
         Ok(())
@@ -470,7 +471,7 @@ mod tests {
             [
                 "pgrep -x wezterm-gui".to_string(),
                 "wezterm cli --no-auto-start spawn --cwd /Users/me/it's here".to_string(),
-                format!("wezterm cli --no-auto-start send-text --no-paste --pane-id 7 {LINE}\n"),
+                format!("wezterm cli --no-auto-start send-text --no-paste --pane-id 7 {LINE}\r"),
             ]
         );
         assert!(sleeps.is_empty());

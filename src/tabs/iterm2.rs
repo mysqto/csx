@@ -78,7 +78,7 @@ fn focus_script(session_id: &str) -> Result<String> {
 }
 
 /// Opens a tab in the current window, or a window when there is none, and
-/// writes `line` to its session; `write text` ends it with a newline.
+/// writes `line` to its session; `write text` ends it with a return.
 fn open_script(line: &str) -> String {
     // Serializing a string cannot fail.
     let line = serde_json::to_string(line).unwrap_or_default();

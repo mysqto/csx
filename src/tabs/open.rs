@@ -27,7 +27,8 @@ pub enum OpenOutcome {
 /// folder and config folder can be typed safely, and the id passes the tool's
 /// check. Then it lists the agents again: when one
 /// runs this session in a tab, csx focuses that tab and opens nothing. When
-/// the process list cannot be read, csx refuses, because it cannot tell.
+/// one runs it with no tab to focus, or when the process list cannot be
+/// read, csx refuses.
 // The brief fixes this signature: the ports, the two registries, the agent
 // context, the index and the three values the plugin passes.
 #[allow(clippy::too_many_arguments)]
@@ -55,17 +56,17 @@ pub fn open_session(
     let cwd = session.project_path.as_deref().ok_or_else(no_session)?;
     let path = Path::new(cwd);
     if !path.is_absolute() || !path.is_dir() {
-        return Err(Error::other(format!("the folder {cwd} no longer exists")));
+        return Err(Error::other(format!("the folder {cwd:?} no longer exists")));
     }
     if !is_safe_typed_path(cwd) {
         return Err(Error::other(format!(
-            "the folder {cwd} cannot be typed safely"
+            "the folder {cwd:?} cannot be typed safely"
         )));
     }
     let env = session_env(tool, session.config_dir.as_deref(), &ctx.home);
     if let Some((_, dir)) = env.iter().find(|(_, v)| !is_safe_typed_path(v)) {
         return Err(Error::other(format!(
-            "the config folder {dir} cannot be typed safely"
+            "the config folder {dir:?} cannot be typed safely"
         )));
     }
     let line = resume_line(tool, session_id, cwd, &env)
@@ -74,12 +75,21 @@ pub fn open_session(
     if process_list_failed(&report) {
         return Err(Error::other("could not read the process list"));
     }
-    let live = report.rows.iter().find(|r| {
-        r.agent
-            .as_ref()
-            .is_some_and(|a| a.session_id.as_deref() == Some(session_id))
-    });
-    if let Some(tab_ref) = live.and_then(|r| r.ref_.clone()) {
+    // Every detected agent counts, also one whose row has no ref: starting a
+    // second copy of a running session is the thing to avoid.
+    if report.live_sessions.iter().any(|s| s == session_id) {
+        let tab_ref = report.rows.iter().find_map(|r| {
+            let runs = r
+                .agent
+                .as_ref()
+                .is_some_and(|a| a.session_id.as_deref() == Some(session_id));
+            r.ref_.clone().filter(|_| runs)
+        });
+        let Some(tab_ref) = tab_ref else {
+            return Err(Error::other(format!(
+                "session {session_id} is already running outside a terminal tab"
+            )));
+        };
         app::focus(ports, backends, &tab_ref)?;
         return Ok(OpenOutcome::Focused(tab_ref));
     }
@@ -288,6 +298,52 @@ mod tests {
     }
 
     #[test]
+    fn a_running_session_with_no_tab_ref_is_an_error_and_opens_nothing() {
+        let root = tmp("no-ref");
+        let db = db_with(Tool::Codex, U1, root.to_str(), None);
+        let l = log();
+        // The agent's tab has no ref, so there is nothing to focus.
+        let mut no_ref = with_tty(tab("iterm2", "x", "codex", 1, 1), "ttys002");
+        no_ref.ref_ = None;
+        let r = Rig {
+            os: FakeOs::new(&l).answer("ps -axo", &ps_line(10, "ttys002")),
+            backends: vec![
+                FakeBackend::new("ghostty", &l).boxed(),
+                FakeBackend::new("iterm2", &l).tabs(vec![no_ref]).boxed(),
+            ],
+            agents: vec![Box::new(FakeAgent {
+                infos: vec![running(10, U1)],
+            })],
+            log: l,
+        };
+        assert_eq!(
+            err(r.open(&db, "ghostty", "codex", U1)),
+            format!("session {U1} is already running outside a terminal tab")
+        );
+        assert!(r.opened().is_empty());
+        assert!(!r.log.borrow().iter().any(|e| e.starts_with("focus")));
+    }
+
+    #[test]
+    fn folder_errors_stay_on_one_line() {
+        let root = tmp("one-line");
+        let r = rig();
+        let unsafe_dir = root.join("a\nb\x1b[2Jc");
+        fs::create_dir_all(&unsafe_dir).unwrap();
+        let gone = root.join("gone\nx\x1b");
+        let cases = [
+            db_with(Tool::Codex, U1, unsafe_dir.to_str(), None),
+            db_with(Tool::Codex, U1, root.to_str(), unsafe_dir.to_str()),
+            db_with(Tool::Codex, U1, gone.to_str(), None),
+        ];
+        for db in &cases {
+            let e = err(r.open(db, "ghostty", "codex", U1));
+            assert!(!e.chars().any(char::is_control), "{e:?}");
+            assert!(e.contains("\\n") && e.contains("\\u{1b}"), "{e:?}");
+        }
+    }
+
+    #[test]
     fn a_failed_focus_is_an_error_and_opens_nothing() {
         let root = tmp("focus-fail");
         let db = db_with(Tool::Codex, U1, root.to_str(), None);
@@ -399,14 +455,14 @@ mod tests {
         let db = db_with(Tool::Codex, U1, Some(gone), None);
         assert_eq!(
             err(r.open(&db, "ghostty", "codex", U1)),
-            format!("the folder {gone} no longer exists")
+            format!("the folder {gone:?} no longer exists")
         );
         // `src` exists relative to the test's folder; it is still refused.
         for rel in ["src", "-rf"] {
             let db = db_with(Tool::Codex, U1, Some(rel), None);
             assert_eq!(
                 err(r.open(&db, "ghostty", "codex", U1)),
-                format!("the folder {rel} no longer exists")
+                format!("the folder {rel:?} no longer exists")
             );
         }
         assert!(r.log.borrow().is_empty());
@@ -423,13 +479,13 @@ mod tests {
             let db = db_with(Tool::Codex, U1, Some(dir), None);
             assert_eq!(
                 err(r.open(&db, "ghostty", "codex", U1)),
-                format!("the folder {dir} cannot be typed safely")
+                format!("the folder {dir:?} cannot be typed safely")
             );
             let ok = root.to_str().unwrap();
             let db = db_with(Tool::Codex, U1, Some(ok), Some(dir));
             assert_eq!(
                 err(r.open(&db, "ghostty", "codex", U1)),
-                format!("the config folder {dir} cannot be typed safely")
+                format!("the config folder {dir:?} cannot be typed safely")
             );
         }
         assert!(r.log.borrow().is_empty());
