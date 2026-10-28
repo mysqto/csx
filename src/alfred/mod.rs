@@ -25,6 +25,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         "csx.sh",
         include_bytes!("../../contrib/alfred/csx-tabs/csx.sh"),
     ),
+    (
+        "open.sh",
+        include_bytes!("../../contrib/alfred/csx-tabs/open.sh"),
+    ),
 ];
 
 const DEFAULTS_DOMAIN: &str = "com.runningwithcrayons.Alfred-Preferences";
@@ -363,7 +367,7 @@ pub fn install(prefs: &Path, hotkeys: &Hotkeys) -> Result<InstallReport> {
         } else {
             std::fs::write(&tmp, bytes)?;
         }
-        if *name == "csx.sh" {
+        if name.ends_with(".sh") {
             set_exec(&tmp)?;
         }
         std::fs::rename(&tmp, &path)?;
@@ -521,11 +525,13 @@ mod tests {
         for (name, bytes) in FILES {
             assert_eq!(&std::fs::read(r.dir.join(name)).unwrap(), bytes);
         }
-        let mode = std::fs::metadata(r.dir.join("csx.sh"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o755);
+        for script in ["csx.sh", "open.sh"] {
+            let mode = std::fs::metadata(r.dir.join(script))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "{script}");
+        }
         // Re-install is fine.
         install(&p, &Hotkeys::default()).unwrap();
     }
@@ -541,6 +547,25 @@ mod tests {
             std::fs::read_to_string(dir.join("prefs.plist")).unwrap(),
             "mine"
         );
+    }
+
+    #[test]
+    fn install_keeps_the_saved_terminal() {
+        let p = prefs_with_workflows("keep-terminal");
+        let dir = p.join("workflows").join(WORKFLOW_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefs = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n\
+<dict>\n\t<key>terminal</key>\n\t<string>wezterm</string>\n</dict>\n</plist>\n";
+        std::fs::write(dir.join("prefs.plist"), prefs).unwrap();
+        seed_installed(&p, None, Some("alt+a"));
+        install(&p, &Hotkeys::default()).unwrap();
+        install(&p, &Hotkeys::default()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prefs.plist")).unwrap(),
+            prefs
+        );
+        // The "terminal" popup reads that value.
+        assert!(installed_plist(&p).contains("<string>terminal</string>"));
     }
 
     #[test]
@@ -626,19 +651,22 @@ mod tests {
             "<string>agents_keyword</string>",
             "<string>csx_path</string>",
             "./csx.sh tabs --alfred -- \"$1\"",
-            "./csx.sh tabs --agents --alfred -- \"$1\"",
+            "./csx.sh tabs --agents --closed --alfred -- \"$1\"",
+            "./open.sh pick",
+            "./open.sh open \"$1\"",
             "./csx.sh tabs focus",
             "alfred.workflow.output.clipboard",
             "alfred.workflow.trigger.hotkey",
         ] {
             assert!(s.contains(want), "missing {want}");
         }
-        // Destination uids of the four connections into R and C, plus H1/H2 -> A/B.
-        for n in 1..=6 {
-            let uid = format!("6C5D0A00-7A11-4B2E-9C3D-00000000000{n}");
-            assert!(s.contains(&format!("<string>{uid}</string>")), "uid {n}");
+        let uid = |n: u32| format!("6C5D0A00-7A11-4B2E-9C3D-{n:012X}");
+        for n in 1..=0xE {
+            assert!(
+                s.contains(&format!("<string>{}</string>", uid(n))),
+                "uid {n}"
+            );
         }
-        let uid = |n: u32| format!("6C5D0A00-7A11-4B2E-9C3D-00000000000{n}");
         let expect = |src: u32, want: &[(u32, u32)]| {
             let key = format!("<key>{}</key>", uid(src));
             let at = s
@@ -669,17 +697,25 @@ mod tests {
             let want: Vec<(String, u32)> = want.iter().map(|(d, m)| (uid(*d), *m)).collect();
             assert_eq!(got, want, "connections of {src}");
         };
-        // A and B -> R (no modifier), C with Cmd and Option; H1 -> A, H2 -> B.
+        // A -> R (no modifier), C with Cmd and Option; B -> the router D
+        // (no modifier and Ctrl), C with Cmd and Option; H1 -> A, H2 -> B.
         expect(1, &[(3, 0), (4, 1048576), (4, 524288)]);
-        expect(2, &[(3, 0), (4, 1048576), (4, 524288)]);
+        expect(2, &[(7, 0), (4, 1048576), (4, 524288), (7, 262144)]);
         expect(5, &[(1, 0)]);
         expect(6, &[(2, 0)]);
-        assert_eq!(s.matches("<key>destinationuid</key>").count(), 8);
+        // D -> focus, picker (twice), open; picker vars -> picker -> open -> notify.
+        expect(7, &[(3, 0), (8, 0), (8, 0), (0xA, 0)]);
+        expect(8, &[(9, 0)]);
+        expect(9, &[(0xA, 0)]);
+        expect(0xA, &[(0xE, 0)]);
+        assert_eq!(s.matches("<key>destinationuid</key>").count(), 16);
         assert!(!s.contains("<key>hotkey</key>"));
         assert!(s.contains("Copy the session id or folder"));
         assert!(s.contains("Copy the resume command"));
-        let (_, sh) = FILES.iter().find(|(n, _)| *n == "csx.sh").unwrap();
-        assert!(sh.starts_with(b"#!/bin/sh"));
+        for script in ["csx.sh", "open.sh"] {
+            let (_, sh) = FILES.iter().find(|(n, _)| *n == script).unwrap();
+            assert!(sh.starts_with(b"#!/bin/sh"), "{script}");
+        }
         let (_, png) = FILES.iter().find(|(n, _)| *n == "icon.png").unwrap();
         assert!(png.starts_with(b"\x89PNG"));
     }
@@ -988,8 +1024,8 @@ mod tests {
             s.matches("<key>uid</key>").count(),
             TEMPLATE.matches("<key>uid</key>").count()
         );
-        for n in 1..=6 {
-            let uid = format!("6C5D0A00-7A11-4B2E-9C3D-00000000000{n}");
+        for n in 1..=0xE {
+            let uid = format!("6C5D0A00-7A11-4B2E-9C3D-{n:012X}");
             assert!(s.contains(&format!("<string>{uid}</string>")), "uid {n}");
         }
         assert!(s.contains("alfred.workflow.trigger.hotkey"));
@@ -1007,5 +1043,449 @@ mod tests {
         let r = install(&p, &Hotkeys::default()).unwrap();
         assert_eq!(r.tabs_hotkey, HotkeyOutcome::Unset);
         assert_eq!(installed_plist(&p), TEMPLATE);
+    }
+
+    // ---- workflow layout ---------------------------------------------------
+
+    /// The template as JSON, converted by `plutil`.
+    fn template_json() -> serde_json::Value {
+        let out = std::process::Command::new("plutil")
+            .args(["-convert", "json", "-o", "-", "--"])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/contrib/alfred/csx-tabs/info.plist"
+            ))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "plutil failed");
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn object<'a>(v: &'a serde_json::Value, uid: &str) -> &'a serde_json::Value {
+        v["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["uid"] == uid)
+            .unwrap_or_else(|| panic!("no object {uid}"))
+    }
+
+    const fn u(n: u32) -> &'static str {
+        match n {
+            1 => "6C5D0A00-7A11-4B2E-9C3D-000000000001",
+            2 => "6C5D0A00-7A11-4B2E-9C3D-000000000002",
+            3 => "6C5D0A00-7A11-4B2E-9C3D-000000000003",
+            7 => "6C5D0A00-7A11-4B2E-9C3D-000000000007",
+            8 => "6C5D0A00-7A11-4B2E-9C3D-000000000008",
+            9 => "6C5D0A00-7A11-4B2E-9C3D-000000000009",
+            0xA => "6C5D0A00-7A11-4B2E-9C3D-00000000000A",
+            0xB => "6C5D0A00-7A11-4B2E-9C3D-00000000000B",
+            0xC => "6C5D0A00-7A11-4B2E-9C3D-00000000000C",
+            0xD => "6C5D0A00-7A11-4B2E-9C3D-00000000000D",
+            _ => "6C5D0A00-7A11-4B2E-9C3D-00000000000E",
+        }
+    }
+
+    #[test]
+    fn workflow_uids_are_unique_and_every_connection_resolves() {
+        let v = template_json();
+        let objects = v["objects"].as_array().unwrap();
+        let mut uids: Vec<&str> = objects.iter().map(|o| o["uid"].as_str().unwrap()).collect();
+        let n = uids.len();
+        assert_eq!(n, 11);
+        let mut outputs: Vec<&str> = vec![];
+        for o in objects {
+            for c in o["config"]["conditions"].as_array().into_iter().flatten() {
+                outputs.push(c["uid"].as_str().unwrap());
+            }
+        }
+        let mut all = uids.clone();
+        all.extend(&outputs);
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n + outputs.len(), "uids are not unique");
+        uids.sort_unstable();
+        for (src, conns) in v["connections"].as_object().unwrap() {
+            assert!(uids.binary_search(&src.as_str()).is_ok(), "source {src}");
+            let src_obj = object(&v, src);
+            for c in conns.as_array().unwrap() {
+                let dest = c["destinationuid"].as_str().unwrap();
+                assert!(uids.binary_search(&dest).is_ok(), "{src} -> {dest}");
+                if let Some(out) = c.get("sourceoutputuid") {
+                    let own: Vec<&serde_json::Value> = src_obj["config"]["conditions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| &c["uid"])
+                        .collect();
+                    assert!(own.contains(&out), "{src} output {out}");
+                }
+            }
+        }
+        for uid in &uids {
+            assert!(v["uidata"].get(*uid).is_some(), "no position for {uid}");
+        }
+    }
+
+    #[test]
+    fn workflow_routes_closed_sessions_through_the_picker() {
+        let v = template_json();
+        let ai = object(&v, u(2));
+        assert_eq!(
+            ai["config"]["script"],
+            "./csx.sh tabs --agents --closed --alfred -- \"$1\""
+        );
+        assert_eq!(
+            object(&v, u(1))["config"]["script"],
+            "./csx.sh tabs --alfred -- \"$1\""
+        );
+
+        let router = object(&v, u(7));
+        assert_eq!(router["type"], "alfred.workflow.utility.conditional");
+        let conds: Vec<(String, String, String, i64)> = router["config"]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["uid"].as_str().unwrap().to_string(),
+                    c["inputstring"].as_str().unwrap().to_string(),
+                    c["matchstring"].as_str().unwrap().to_string(),
+                    c["matchmode"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        let want = [
+            (u(0xB), "{var:csx_kind}", "tab"),
+            (u(0xC), "{var:csx_kind}", "closed_pick"),
+            (u(0xD), "{var:csx_kind}|{var:terminal}", "closed|"),
+        ];
+        let want: Vec<(String, String, String, i64)> = want
+            .iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string(), 0))
+            .collect();
+        assert_eq!(conds, want);
+        let routes: Vec<(String, Option<String>)> = v["connections"][u(7)]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["destinationuid"].as_str().unwrap().to_string(),
+                    c.get("sourceoutputuid")
+                        .map(|s| s.as_str().unwrap().to_string()),
+                )
+            })
+            .collect();
+        let want: Vec<(String, Option<String>)> = [
+            (u(3), Some(u(0xB))),
+            (u(8), Some(u(0xC))),
+            (u(8), Some(u(0xD))),
+            (u(0xA), None),
+        ]
+        .iter()
+        .map(|(d, s)| (d.to_string(), s.map(str::to_string)))
+        .collect();
+        assert_eq!(routes, want);
+
+        let vars = object(&v, u(8));
+        assert_eq!(vars["type"], "alfred.workflow.utility.argument");
+        assert_eq!(vars["config"]["argument"], "");
+        assert_eq!(vars["config"]["passthroughargument"], false);
+        assert_eq!(
+            vars["config"]["variables"],
+            serde_json::json!({"csx_session": "{query}"})
+        );
+        let picker = object(&v, u(9));
+        assert_eq!(picker["type"], "alfred.workflow.input.scriptfilter");
+        assert_eq!(picker["config"]["script"], "./open.sh pick");
+        assert_eq!(picker["config"]["alfredfiltersresults"], true);
+        let open = object(&v, u(0xA));
+        assert_eq!(open["type"], "alfred.workflow.action.script");
+        assert_eq!(open["config"]["script"], "./open.sh open \"$1\"");
+        let notify = object(&v, u(0xE));
+        assert_eq!(notify["type"], "alfred.workflow.output.notification");
+        assert_eq!(notify["config"]["onlyshowifquerypopulated"], true);
+        assert_eq!(notify["config"]["text"], "{query}");
+    }
+
+    #[test]
+    fn workflow_terminal_popup_lists_every_terminal_and_ask_each_time() {
+        let v = template_json();
+        let item = v["userconfigurationconfig"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["variable"] == "terminal")
+            .expect("terminal configuration");
+        assert_eq!(item["type"], "popupbutton");
+        assert_eq!(item["config"]["default"], "");
+        let mut want = vec![serde_json::json!(["Ask each time", ""])];
+        want.extend(
+            crate::tabs::TERMINALS
+                .iter()
+                .map(|t| serde_json::json!([t.name, t.id])),
+        );
+        assert_eq!(item["config"]["pairs"], serde_json::Value::Array(want));
+        let names: Vec<&str> = crate::tabs::TERMINALS.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["Ghostty", "iTerm2", "Terminal", "kitty", "WezTerm"]);
+    }
+
+    // ---- open.sh -----------------------------------------------------------
+
+    /// A temp workflow folder with the embedded scripts and stub `csx` and
+    /// `osascript` commands that log their arguments.
+    struct Shell {
+        dir: PathBuf,
+    }
+
+    const STUB_CSX: &str = r#"#!/bin/sh
+printf 'csx' >> "$STUB_LOG"; for a in "$@"; do printf ' [%s]' "$a" >> "$STUB_LOG"; done; echo >> "$STUB_LOG"
+case "$1 $2" in
+"tabs terminals")
+  default='[{"id":"ghostty","name":"Ghostty"},{"id":"terminal","name":"Terminal"}]'
+  printf '%s\n' "${STUB_TERMINALS-$default}" ;;
+"tabs open")
+  if [ -n "${STUB_FAIL-}" ]; then printf 'csx: %s\n' "$STUB_FAIL" >&2; exit 1; fi
+  if [ -n "${STUB_FOCUSED-}" ]; then echo "focused ghostty:1"; fi ;;
+esac
+"#;
+
+    const STUB_OSA: &str = r#"#!/bin/sh
+printf 'osascript' >> "$STUB_LOG"; for a in "$@"; do printf ' [%s]' "$a" >> "$STUB_LOG"; done; echo >> "$STUB_LOG"
+"#;
+
+    impl Shell {
+        fn new(name: &str) -> Shell {
+            let dir = tmp(&format!("sh-{name}"));
+            for (file, bytes) in FILES.iter().filter(|(n, _)| n.ends_with(".sh")) {
+                std::fs::write(dir.join(file), bytes).unwrap();
+                set_exec(&dir.join(file)).unwrap();
+            }
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            for (file, body) in [("csx", STUB_CSX), ("osascript", STUB_OSA)] {
+                std::fs::write(bin.join(file), body).unwrap();
+                set_exec(&bin.join(file)).unwrap();
+            }
+            std::fs::write(dir.join("log"), "").unwrap();
+            Shell { dir }
+        }
+
+        /// Run `open.sh` with `args` and only the given variables set; the
+        /// stdout and the stub log.
+        fn run(&self, args: &[&str], vars: &[(&str, &str)]) -> (String, String) {
+            let bin = self.dir.join("bin");
+            let out = std::process::Command::new("/bin/sh")
+                .arg(self.dir.join("open.sh"))
+                .args(args)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("HOME", &self.dir)
+                .env("csx_path", bin.join("csx"))
+                .env("STUB_LOG", self.dir.join("log"))
+                .envs(vars.iter().copied())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "open.sh exited {:?}", out.status);
+            let log = std::fs::read_to_string(self.dir.join("log")).unwrap();
+            std::fs::write(self.dir.join("log"), "").unwrap();
+            (String::from_utf8(out.stdout).unwrap(), log)
+        }
+    }
+
+    const SID: &str = "4a5b6c7d-0000-4000-8000-00000000beef";
+    const SAVE: &str = "osascript [-e] [on run argv] [-e] [tell application id \
+\"com.runningwithcrayons.Alfred\" to set configuration \"terminal\" to value (item 1 of argv) \
+in workflow \"to.mysq.csx-tabs\" exportable false] [-e] [end run] [iterm2]\n";
+
+    #[test]
+    fn open_script_opens_in_the_saved_terminal() {
+        let sh = Shell::new("saved");
+        let vars = [
+            ("csx_kind", "closed"),
+            ("csx_tool", "codex"),
+            ("terminal", "kitty"),
+        ];
+        let (out, log) = sh.run(&["open", SID], &vars);
+        assert_eq!(out, "");
+        assert_eq!(
+            log,
+            format!("csx [tabs] [open] [--terminal] [kitty] [--] [codex] [{SID}]\n")
+        );
+        // A focused tab is success too: nothing to show.
+        let (out, _) = sh.run(
+            &["open", SID],
+            &[vars.as_slice(), &[("STUB_FOCUSED", "1")]].concat(),
+        );
+        assert_eq!(out, "");
+        // The picker's choice wins over the saved terminal.
+        let (_, log) = sh.run(
+            &["open", SID],
+            &[vars.as_slice(), &[("csx_terminal", "wezterm")]].concat(),
+        );
+        assert!(log.contains("[--terminal] [wezterm]"), "{log}");
+    }
+
+    #[test]
+    fn open_script_saves_the_choice_only_when_asked() {
+        let sh = Shell::new("save");
+        let vars = [
+            ("csx_kind", "closed"),
+            ("csx_tool", "claude-code"),
+            ("csx_terminal", "iterm2"),
+            ("csx_save", "1"),
+        ];
+        let (out, log) = sh.run(&["open", SID], &vars);
+        assert_eq!(out, "");
+        assert_eq!(
+            log,
+            format!("{SAVE}csx [tabs] [open] [--terminal] [iterm2] [--] [claude-code] [{SID}]\n")
+        );
+        let vars = [
+            ("csx_kind", "closed_pick"),
+            ("csx_tool", "claude-code"),
+            ("csx_terminal", "iterm2"),
+            ("csx_save", "0"),
+            ("terminal", "ghostty"),
+        ];
+        let (_, log) = sh.run(&["open", SID], &vars);
+        assert!(!log.contains("osascript"), "{log}");
+        assert!(log.contains("[--terminal] [iterm2]"), "{log}");
+    }
+
+    #[test]
+    fn open_script_prints_the_error_and_keeps_the_saved_terminal() {
+        let sh = Shell::new("fail");
+        let vars = [
+            ("csx_tool", "codex"),
+            ("terminal", "ghostty"),
+            ("STUB_FAIL", "the folder \"/gone\" no longer exists"),
+        ];
+        let (out, log) = sh.run(&["open", SID], &vars);
+        assert_eq!(out, "csx: the folder \"/gone\" no longer exists\n");
+        assert!(!log.contains("osascript"), "{log}");
+        // With a picked terminal to save, the choice is still saved once.
+        let vars = [
+            ("csx_tool", "codex"),
+            ("csx_terminal", "iterm2"),
+            ("csx_save", "1"),
+            ("STUB_FAIL", "boom"),
+        ];
+        let (out, log) = sh.run(&["open", SID], &vars);
+        assert_eq!(out, "csx: boom\n");
+        assert_eq!(log.matches("osascript").count(), 1, "{log}");
+    }
+
+    #[test]
+    fn open_script_refuses_a_missing_or_odd_terminal() {
+        let sh = Shell::new("noterm");
+        let (out, log) = sh.run(&["open", SID], &[("csx_tool", "codex")]);
+        assert_eq!(
+            out,
+            "csx: choose a terminal first (Ctrl+Return on the session)\n"
+        );
+        assert_eq!(log, "");
+        for bad in ["Ghost tty", "a\"b", "x;rm", "-x"] {
+            let vars = [
+                ("csx_tool", "codex"),
+                ("csx_terminal", bad),
+                ("csx_save", "1"),
+            ];
+            let (out, log) = sh.run(&["open", SID], &vars);
+            assert_eq!(out, "csx: unknown terminal\n", "{bad}");
+            assert_eq!(log, "", "{bad}");
+        }
+    }
+
+    fn items(out: &str) -> Vec<serde_json::Value> {
+        let v: serde_json::Value =
+            serde_json::from_str(out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        v["items"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn picker_lists_the_installed_terminals() {
+        let sh = Shell::new("pick");
+        let vars = [
+            ("csx_kind", "closed"),
+            ("csx_tool", "codex"),
+            ("csx_session", SID),
+        ];
+        let (out, log) = sh.run(&["pick"], &vars);
+        assert_eq!(log, "csx [tabs] [terminals] [--json]\n");
+        assert_eq!(
+            items(&out),
+            [
+                serde_json::json!({
+                    "title": "Ghostty",
+                    "subtitle": "Open in Ghostty and use it from now on",
+                    "arg": SID,
+                    "valid": true,
+                    "variables": {"csx_terminal": "ghostty", "csx_save": "1"}
+                }),
+                serde_json::json!({
+                    "title": "Terminal",
+                    "subtitle": "Open in Terminal and use it from now on",
+                    "arg": SID,
+                    "valid": true,
+                    "variables": {"csx_terminal": "terminal", "csx_save": "1"}
+                }),
+            ]
+        );
+        // Ctrl+Return: open this once, save nothing.
+        let vars = [
+            ("csx_kind", "closed_pick"),
+            ("csx_tool", "codex"),
+            ("csx_session", SID),
+        ];
+        let got = items(&sh.run(&["pick"], &vars).0);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0]["subtitle"], "Open in Ghostty this time");
+        assert_eq!(got[0]["variables"]["csx_save"], "0");
+        assert_eq!(got[1]["variables"]["csx_terminal"], "terminal");
+    }
+
+    #[test]
+    fn picker_skips_odd_entries_and_reports_problems() {
+        let sh = Shell::new("pick-odd");
+        let vars = |t: &'static str| {
+            vec![
+                ("csx_kind", "closed"),
+                ("csx_session", SID),
+                ("STUB_TERMINALS", t),
+            ]
+        };
+        let odd =
+            r#"[{"id":"x\"y","name":"X"},{"id":"kitty","name":"kitty"},{"id":"w","name":"W<b>"}]"#;
+        let got = items(&sh.run(&["pick"], &vars(odd)).0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["variables"]["csx_terminal"], "kitty");
+        for (json, title) in [
+            ("[]", "No supported terminal is installed"),
+            ("", "Could not list terminals"),
+            (r#"{"items":[]}"#, "Could not list terminals"),
+        ] {
+            let got = items(&sh.run(&["pick"], &vars(json)).0);
+            assert_eq!(got.len(), 1, "{json}");
+            assert_eq!(got[0]["title"], title, "{json}");
+            assert_eq!(got[0]["valid"], false);
+        }
+        // No session, or one csx would not have listed: nothing to open.
+        for sid in ["", "-rf", "a b", "x\"y"] {
+            let (out, log) = sh.run(&["pick"], &[("csx_kind", "closed"), ("csx_session", sid)]);
+            let got = items(&out);
+            assert_eq!(got[0]["title"], "No session to open", "{sid}");
+            assert_eq!(got[0]["valid"], false);
+            assert_eq!(log, "", "{sid}");
+        }
+    }
+
+    #[test]
+    fn open_script_rejects_unknown_modes() {
+        let sh = Shell::new("mode");
+        let (out, log) = sh.run(&["nope"], &[]);
+        assert_eq!(out, "csx: unknown mode\n");
+        assert_eq!(log, "");
     }
 }

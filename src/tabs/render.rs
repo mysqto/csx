@@ -149,6 +149,8 @@ struct AlfredItem {
     arg: Option<String>,
     valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    variables: Option<Vars>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     mods: Option<Mods>,
 }
 
@@ -160,7 +162,34 @@ impl AlfredItem {
             subtitle: String::new(),
             arg: None,
             valid: false,
+            variables: None,
             mods: None,
+        }
+    }
+}
+
+/// Workflow variables of an item. The workflow routes on `csx_kind`: `tab`
+/// focuses, `closed` opens in the saved terminal (or asks), `closed_pick`
+/// asks for a terminal for this one session.
+#[derive(Serialize)]
+struct Vars {
+    csx_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csx_tool: Option<String>,
+}
+
+impl Vars {
+    fn tab() -> Self {
+        Vars {
+            csx_kind: "tab",
+            csx_tool: None,
+        }
+    }
+
+    fn closed(kind: &'static str, tool: &str) -> Self {
+        Vars {
+            csx_kind: kind,
+            csx_tool: Some(tool.to_string()),
         }
     }
 }
@@ -170,6 +199,8 @@ struct Mods {
     cmd: Mod,
     #[serde(skip_serializing_if = "Option::is_none")]
     alt: Option<Mod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ctrl: Option<Mod>,
 }
 
 /// A modifier action: copy `arg`. Valid even when the row itself is not, so
@@ -179,6 +210,8 @@ struct Mod {
     arg: String,
     subtitle: String,
     valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variables: Option<Vars>,
 }
 
 impl Mod {
@@ -188,11 +221,13 @@ impl Mod {
                 arg: a.to_string(),
                 subtitle: format!("Copy {what}: {a}"),
                 valid: true,
+                variables: None,
             },
             None => Mod {
                 arg: String::new(),
                 subtitle: "Nothing to copy".into(),
                 valid: false,
+                variables: None,
             },
         }
     }
@@ -222,13 +257,9 @@ fn subtitle(r: &Row, home: Option<&str>) -> String {
     }
     parts.push(r.terminal.clone());
     parts.extend(cwd(r).map(|c| shorten_home(c, home)));
-    let prompt = r
-        .agent
-        .as_ref()
-        .and_then(|a| a.last_prompt.as_deref())
-        .map(one_line)
-        .filter(|p| !p.is_empty());
-    parts.extend(prompt.map(|p| format!("“{}”", cut(&p, PROMPT_MAX))));
+    parts.extend(prompt_part(
+        r.agent.as_ref().and_then(|a| a.last_prompt.as_deref()),
+    ));
     parts.retain(|p| !p.is_empty());
     parts.join(" · ")
 }
@@ -249,7 +280,55 @@ fn alfred_item(r: &Row, home: Option<&str>) -> AlfredItem {
         subtitle: subtitle(r, home),
         arg: r.ref_.clone(),
         valid: r.ref_.is_some(),
-        mods: Some(Mods { cmd, alt }),
+        variables: Some(Vars::tab()),
+        mods: Some(Mods {
+            cmd,
+            alt,
+            ctrl: None,
+        }),
+    }
+}
+
+/// The last prompt as a quoted subtitle part, cut to [`PROMPT_MAX`].
+fn prompt_part(prompt: Option<&str>) -> Option<String> {
+    prompt
+        .map(one_line)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("“{}”", cut(&p, PROMPT_MAX)))
+}
+
+/// A closed session: Return opens it in the saved terminal, Ctrl+Return
+/// picks a terminal for this session, Cmd and Option copy.
+fn closed_item(c: &ClosedSession, home: Option<&str>) -> AlfredItem {
+    let title = c.title.as_deref().map(one_line).unwrap_or_default();
+    let title = if title.is_empty() {
+        c.session_id.clone()
+    } else {
+        title
+    };
+    let mut parts = vec![
+        "closed".to_string(),
+        c.tool.clone(),
+        shorten_home(&c.cwd, home),
+    ];
+    parts.extend(prompt_part(c.last_prompt.as_deref()));
+    let resume = Some(c.resume_command.as_str()).filter(|r| !r.is_empty());
+    AlfredItem {
+        title,
+        subtitle: parts.join(" · "),
+        arg: Some(c.session_id.clone()),
+        valid: true,
+        variables: Some(Vars::closed("closed", &c.tool)),
+        mods: Some(Mods {
+            cmd: Mod::copy("session id", Some(&c.session_id)),
+            alt: Some(Mod::copy("resume command", resume)),
+            ctrl: Some(Mod {
+                arg: c.session_id.clone(),
+                subtitle: "Choose a terminal for this session".into(),
+                valid: true,
+                variables: Some(Vars::closed("closed_pick", &c.tool)),
+            }),
+        }),
     }
 }
 
@@ -260,8 +339,9 @@ pub fn render_alfred(report: &TabsReport) -> String {
 
 /// Alfred script filter JSON, with the cwd shortened against `home`.
 ///
-/// Warnings come first as rows that cannot be actioned. With no rows, one
-/// "No matching tabs" row follows.
+/// Warnings come first as rows that cannot be actioned, then the open rows,
+/// then the closed sessions when they were listed. With neither rows nor
+/// closed sessions, one "No matching tabs" row follows the warnings.
 pub fn render_alfred_with_home(report: &TabsReport, home: Option<&str>) -> String {
     let mut items: Vec<AlfredItem> = report
         .warnings
@@ -269,9 +349,11 @@ pub fn render_alfred_with_home(report: &TabsReport, home: Option<&str>) -> Strin
         .map(|w| AlfredItem::message(w))
         .collect();
     items.extend(report.rows.iter().map(|r| alfred_item(r, home)));
-    if report.rows.is_empty() {
+    let closed = report.closed.as_deref().unwrap_or_default();
+    if report.rows.is_empty() && closed.is_empty() {
         items.push(AlfredItem::message("No matching tabs"));
     }
+    items.extend(closed.iter().map(|c| closed_item(c, home)));
     serde_json::to_string(&AlfredOutput { items }).unwrap_or_default()
 }
 
@@ -348,13 +430,131 @@ mod tests {
         );
     }
 
+    fn full_closed(tool: &str, id: &str, title: Option<&str>, cwd: &str) -> ClosedSession {
+        ClosedSession {
+            last_prompt: Some(format!("next\n{}", "p".repeat(90))),
+            resume_command: format!("cd '{cwd}' && {tool} --resume {id}"),
+            ..closed(tool, id, title, cwd)
+        }
+    }
+
     #[test]
-    fn render_alfred_ignores_closed_sessions() {
+    fn render_alfred_closed_items_follow_the_open_rows() {
+        let mut open = row("ghostty", Some("ghostty:1"), "zsh", Some("/Users/me/w"));
+        open.agent = Some(AgentInfo {
+            tool: "claude-code".into(),
+            session_id: Some("live".into()),
+            ..AgentInfo::default()
+        });
+        let mut r = report(vec![open, row("iterm2", None, "x", None)], &["kitty: off"]);
+        r.closed = Some(vec![
+            full_closed(
+                "claude-code",
+                "u1",
+                Some("Fix\nlogin"),
+                "/Users/me/work/acme",
+            ),
+            closed("devin", "swift-otter", None, "/srv/app"),
+            closed("codex", "u3", Some(" \n "), "/Users/me"),
+        ]);
+        let items = alfred(&r);
+        assert_eq!(items.len(), 6);
+        assert_eq!(items[0]["title"], "kitty: off");
+        assert!(items[0].get("variables").is_none());
+        // Every open row says it is a tab, also one with no ref.
+        for i in [1, 2] {
+            assert_eq!(
+                items[i]["variables"],
+                serde_json::json!({"csx_kind": "tab"})
+            );
+            assert!(items[i]["mods"].get("ctrl").is_none());
+        }
+        assert_eq!(items[1]["arg"], "ghostty:1");
+
+        let c = &items[3];
+        assert!(c.get("uid").is_none());
+        assert_eq!(c["title"], "Fix login");
+        let prompt = format!("next {}…", "p".repeat(74));
+        assert_eq!(
+            c["subtitle"],
+            format!("closed · claude-code · ~/work/acme · “{prompt}”")
+        );
+        assert_eq!(c["arg"], "u1");
+        assert_eq!(c["valid"], true);
+        assert_eq!(
+            c["variables"],
+            serde_json::json!({"csx_kind": "closed", "csx_tool": "claude-code"})
+        );
+        assert_eq!(
+            c["mods"]["cmd"],
+            serde_json::json!({"arg": "u1", "subtitle": "Copy session id: u1", "valid": true})
+        );
+        let resume = "cd '/Users/me/work/acme' && claude-code --resume u1";
+        assert_eq!(
+            c["mods"]["alt"],
+            serde_json::json!({
+                "arg": resume,
+                "subtitle": format!("Copy resume command: {resume}"),
+                "valid": true
+            })
+        );
+        assert_eq!(
+            c["mods"]["ctrl"],
+            serde_json::json!({
+                "arg": "u1",
+                "subtitle": "Choose a terminal for this session",
+                "valid": true,
+                "variables": {"csx_kind": "closed_pick", "csx_tool": "claude-code"}
+            })
+        );
+
+        // No title: the session id. No prompt: no quote part.
+        let d = &items[4];
+        assert_eq!(d["title"], "swift-otter");
+        assert_eq!(d["subtitle"], "closed · devin · /srv/app");
+        assert_eq!(d["variables"]["csx_tool"], "devin");
+        assert_eq!(d["mods"]["ctrl"]["variables"]["csx_tool"], "devin");
+        assert_eq!(d["mods"]["alt"]["arg"], "");
+        assert_eq!(d["mods"]["alt"]["valid"], false);
+        let e = &items[5];
+        assert_eq!(e["title"], "u3");
+        assert_eq!(e["subtitle"], "closed · codex · ~");
+    }
+
+    #[test]
+    fn render_alfred_no_matching_tabs_only_when_both_lists_are_empty() {
         let mut r = report(vec![], &[]);
         r.closed = Some(vec![closed("codex", "u2", Some("t"), "/w")]);
         let items = alfred(&r);
         assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["title"], "t");
+        assert_eq!(items[0]["variables"]["csx_kind"], "closed");
+        r.closed = Some(vec![]);
+        let items = alfred(&r);
+        assert_eq!(items.len(), 1);
         assert_eq!(items[0]["title"], "No matching tabs");
+        assert!(items[0].get("variables").is_none());
+        r.closed = None;
+        assert_eq!(alfred(&r)[0]["title"], "No matching tabs");
+    }
+
+    #[test]
+    fn render_alfred_closed_items_with_hostile_text() {
+        let hostile = "He said \"hi\" \\ </script>&' 🚀";
+        let mut c = full_closed("codex", "s\"1\\", Some(hostile), "/w/\"q\"");
+        c.last_prompt = Some("say \"x\"\\n\n🙂".into());
+        let mut r = report(vec![], &[]);
+        r.closed = Some(vec![c]);
+        let raw = render_alfred_with_home(&r, Some("/Users/me"));
+        let items = alfred(&r);
+        assert_eq!(items[0]["title"], hostile);
+        assert_eq!(items[0]["arg"], "s\"1\\");
+        assert_eq!(
+            items[0]["subtitle"],
+            "closed · codex · /w/\"q\" · “say \"x\"\\n 🙂”"
+        );
+        assert_eq!(items[0]["mods"]["ctrl"]["arg"], "s\"1\\");
+        assert!(!raw.contains('\n'));
     }
 
     fn alfred(r: &TabsReport) -> Vec<Value> {

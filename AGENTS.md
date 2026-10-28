@@ -114,7 +114,7 @@ one real adapter.
 | `tabs/os_shim.rs`   | `RealOsa`, `RealCommand`, `RealTty`, `RealSleeper`.                   | tab ports → **shim**                    |
 | `agent/*`           | `Agent` trait, `registry()`, `detect`; `claude.rs`, `codex.rs`, `generic.rs` (process-name agents). | consume `ProcessTable`   |
 | `agent/devin.rs`    | Devin agent: session from the pid lock file, details from `sessions.db` (read-only). | —                        |
-| `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/`. | consumes `CommandRunner` |
+| `alfred/mod.rs`     | `prefs_dir` and `install`: writes the embedded workflow from `contrib/alfred/csx-tabs/` (`info.plist`, `csx.sh`, and `open.sh`, the terminal picker and `csx tabs open` step). Keeps `prefs.plist`, where Alfred stores the user's keywords and saved terminal. Its tests run `open.sh` with stub `csx` and `osascript` commands. | consumes `CommandRunner` |
 
 `contrib/raycast/csx-tabs/` is a separate TypeScript project, the Raycast
 extension. It runs `csx tabs --json` and `csx tabs focus -- <ref>`, so the

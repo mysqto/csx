@@ -45,11 +45,11 @@ pub fn open_session(
     let backend = backends
         .iter()
         .find(|b| b.id() == terminal)
-        .ok_or_else(|| Error::other(format!("unknown terminal: {terminal}")))?;
+        .ok_or_else(|| Error::other(format!("unknown terminal: {terminal:?}")))?;
     if !RESUMABLE_TOOLS.contains(&tool) {
-        return Err(Error::other(format!("cannot resume {tool} sessions")));
+        return Err(Error::other(format!("cannot resume {tool:?} sessions")));
     }
-    let no_session = || Error::other(format!("no such session: {tool} {session_id}"));
+    let no_session = || Error::other(format!("no such session: {tool:?} {session_id:?}"));
     let session = db
         .resumable_session(tool, session_id)?
         .ok_or_else(no_session)?;
@@ -70,7 +70,7 @@ pub fn open_session(
         )));
     }
     let line = resume_line(tool, session_id, cwd, &env)
-        .ok_or_else(|| Error::other(format!("invalid session id: {session_id}")))?;
+        .ok_or_else(|| Error::other(format!("invalid session id: {session_id:?}")))?;
     let report = app::list(ports, backends, agents, ctx, &ListOptions::default());
     if process_list_failed(&report) {
         return Err(Error::other("could not read the process list"));
@@ -405,16 +405,16 @@ mod tests {
         let r = rig();
         assert_eq!(
             err(r.open(&db, "tmux", "codex", U1)),
-            "unknown terminal: tmux"
+            "unknown terminal: \"tmux\""
         );
         // A terminal csx supports but that is not among the backends.
         assert_eq!(
             err(r.open(&db, "kitty", "codex", U1)),
-            "unknown terminal: kitty"
+            "unknown terminal: \"kitty\""
         );
         assert_eq!(
             err(r.open(&db, "ghostty", "gemini", U1)),
-            "cannot resume gemini sessions"
+            "cannot resume \"gemini\" sessions"
         );
         // Nothing was listed or run.
         assert!(r.log.borrow().is_empty());
@@ -427,18 +427,18 @@ mod tests {
         let r = rig();
         assert_eq!(
             err(r.open(&db, "ghostty", "codex", U2)),
-            format!("no such session: codex {U2}")
+            format!("no such session: \"codex\" {U2:?}")
         );
         // The id is looked up for its own tool only.
         assert_eq!(
             err(r.open(&db, "ghostty", "devin", U1)),
-            format!("no such session: devin {U1}")
+            format!("no such session: \"devin\" {U1:?}")
         );
         // A session with no folder cannot be resumed.
         let db = db_with(Tool::Codex, U1, None, None);
         assert_eq!(
             err(r.open(&db, "ghostty", "codex", U1)),
-            format!("no such session: codex {U1}")
+            format!("no such session: \"codex\" {U1:?}")
         );
         let broken = Db::open(":memory:").unwrap();
         broken.conn().execute_batch("DROP TABLE sessions;").unwrap();
@@ -514,13 +514,37 @@ mod tests {
         let db = db_with(Tool::Devin, "Bad Id; rm -rf ~", root.to_str(), None);
         assert_eq!(
             err(r.open(&db, "ghostty", "devin", "Bad Id; rm -rf ~")),
-            "invalid session id: Bad Id; rm -rf ~"
+            "invalid session id: \"Bad Id; rm -rf ~\""
         );
         let db = db_with(Tool::Codex, "not-a-uuid", root.to_str(), None);
         assert_eq!(
             err(r.open(&db, "ghostty", "codex", "not-a-uuid")),
-            "invalid session id: not-a-uuid"
+            "invalid session id: \"not-a-uuid\""
         );
+        assert!(r.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn errors_quote_plugin_input_so_control_characters_stay_escaped() {
+        let root = tmp("ctl");
+        let db = db_with(Tool::Devin, "x\x1b[2Jy", root.to_str(), None);
+        let r = rig();
+        let msgs = [
+            err(r.open(&db, "gho\x1bstty", "codex", U1)),
+            err(r.open(&db, "ghostty", "gem\nini\x07", U1)),
+            err(r.open(&db, "ghostty", "codex", "u\r\x1b]0;x\x07")),
+            err(r.open(&db, "ghostty", "devin", "x\x1b[2Jy")),
+        ];
+        assert_eq!(msgs[0], "unknown terminal: \"gho\\u{1b}stty\"");
+        assert_eq!(msgs[1], "cannot resume \"gem\\nini\\u{7}\" sessions");
+        assert_eq!(
+            msgs[2],
+            "no such session: \"codex\" \"u\\r\\u{1b}]0;x\\u{7}\""
+        );
+        assert_eq!(msgs[3], "invalid session id: \"x\\u{1b}[2Jy\"");
+        for m in &msgs {
+            assert!(!m.chars().any(char::is_control), "{m:?}");
+        }
         assert!(r.log.borrow().is_empty());
     }
 }

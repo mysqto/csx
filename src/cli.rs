@@ -2071,6 +2071,32 @@ tabs_hotkey: None, agents_hotkey: None } })"
     }
 
     #[test]
+    fn dispatch_alfred_with_closed_lists_closed_items_after_the_tabs() {
+        let mut report = one_tab_report();
+        report.closed = Some(vec![crate::tabs::ClosedSession {
+            tool: "codex".into(),
+            session_id: "u1".into(),
+            cwd: "/Users/me/w".into(),
+            resume_command: "cd '/Users/me/w' && codex resume u1".into(),
+            ..Default::default()
+        }]);
+        let tabs = FakeTabs {
+            report,
+            home: Some(PathBuf::from("/Users/me")),
+            ..Default::default()
+        };
+        let args = ["csx", "tabs", "--agents", "--closed", "--alfred", "--", ""];
+        let out = run_tabs(&args, &tabs).unwrap();
+        assert!(tabs.seen.borrow()[0].contains("closed: Some(50)"));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1]["variables"]["csx_kind"], "tab");
+        assert_eq!(items[2]["variables"]["csx_kind"], "closed");
+        assert_eq!(items[2]["subtitle"], "closed · codex · ~/w");
+    }
+
+    #[test]
     fn dispatch_tabs_focus_calls_runner() {
         let tabs = FakeTabs::default();
         let out = run_tabs(&["csx", "tabs", "focus", "ghostty:abc"], &tabs).unwrap();
