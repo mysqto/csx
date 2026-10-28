@@ -4,7 +4,9 @@
 
 use super::app::{self, process_list_failed, ListOptions};
 use super::{Ports, TerminalBackend};
-use crate::agent::{resume_line, session_env, Agent, AgentContext, RESUMABLE_TOOLS};
+use crate::agent::{
+    is_safe_typed_path, resume_line, session_env, Agent, AgentContext, RESUMABLE_TOOLS,
+};
 use crate::db::Db;
 use crate::error::{Error, Result};
 use std::path::Path;
@@ -21,8 +23,9 @@ pub enum OpenOutcome {
 /// Resume session `session_id` of `tool` in a new tab of `terminal`.
 ///
 /// Checks, in order: the terminal is one of `backends`, the tool can be
-/// resumed, the index has the session, its folder is absolute and exists, and
-/// the id passes the tool's check. Then it lists the agents again: when one
+/// resumed, the index has the session, its folder is absolute and exists, the
+/// folder and config folder can be typed safely, and the id passes the tool's
+/// check. Then it lists the agents again: when one
 /// runs this session in a tab, csx focuses that tab and opens nothing. When
 /// the process list cannot be read, csx refuses, because it cannot tell.
 // The brief fixes this signature: the ports, the two registries, the agent
@@ -54,7 +57,17 @@ pub fn open_session(
     if !path.is_absolute() || !path.is_dir() {
         return Err(Error::other(format!("the folder {cwd} no longer exists")));
     }
+    if !is_safe_typed_path(cwd) {
+        return Err(Error::other(format!(
+            "the folder {cwd} cannot be typed safely"
+        )));
+    }
     let env = session_env(tool, session.config_dir.as_deref(), &ctx.home);
+    if let Some((_, dir)) = env.iter().find(|(_, v)| !is_safe_typed_path(v)) {
+        return Err(Error::other(format!(
+            "the config folder {dir} cannot be typed safely"
+        )));
+    }
     let line = resume_line(tool, session_id, cwd, &env)
         .ok_or_else(|| Error::other(format!("invalid session id: {session_id}")))?;
     let report = app::list(ports, backends, agents, ctx, &ListOptions::default());
@@ -397,6 +410,45 @@ mod tests {
             );
         }
         assert!(r.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn refuses_folders_and_config_dirs_that_cannot_be_typed_safely() {
+        let root = tmp("unsafe");
+        let r = rig();
+        for name in ["a\x03b", "a\nb", "a\rb", "a\x1bb", "trailing\\", "mid\\dle"] {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let dir = dir.to_str().unwrap();
+            let db = db_with(Tool::Codex, U1, Some(dir), None);
+            assert_eq!(
+                err(r.open(&db, "ghostty", "codex", U1)),
+                format!("the folder {dir} cannot be typed safely")
+            );
+            let ok = root.to_str().unwrap();
+            let db = db_with(Tool::Codex, U1, Some(ok), Some(dir));
+            assert_eq!(
+                err(r.open(&db, "ghostty", "codex", U1)),
+                format!("the config folder {dir} cannot be typed safely")
+            );
+        }
+        assert!(r.log.borrow().is_empty());
+        // Quotes, `$` and backticks are typed inside single quotes.
+        let odd = root.join("it's $HOME `x`");
+        fs::create_dir_all(&odd).unwrap();
+        let odd = odd.to_str().unwrap();
+        let db = db_with(Tool::Codex, U1, Some(odd), None);
+        assert_eq!(
+            r.open(&db, "ghostty", "codex", U1).unwrap(),
+            OpenOutcome::Opened
+        );
+        let quoted = odd.replace('\'', "'\\''");
+        assert_eq!(
+            r.opened(),
+            [format!(
+                "open:ghostty:{odd}:cd '{quoted}' && codex resume {U1}"
+            )]
+        );
     }
 
     #[test]

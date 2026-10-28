@@ -24,8 +24,8 @@ pub struct ClosedOptions {
 }
 
 /// Closed sessions, newest first: indexed sessions of [`RESUMABLE_TOOLS`]
-/// whose id is not in `live`, whose folder is absolute and still exists, and
-/// whose id passes the tool's check. Titles and prompts are read only for
+/// whose id is not in `live`, whose folder is absolute and still exists,
+/// whose folders can be typed safely, and whose id passes the tool's check. Titles and prompts are read only for
 /// sessions that pass those checks. `home` decides which config folders are the defaults.
 pub fn list_closed(
     db: &Db,
@@ -459,6 +459,21 @@ mod tests {
         // absolute check can drop it. `-rf` would read as an option.
         session(&db, codex, Tool::Codex, U1, Some("src"), None, 30);
         session(&db, codex, Tool::Codex, U2, Some("-rf"), None, 20);
+        session(&db, codex, Tool::Codex, U3, Some(&kept), None, 10);
+        let got = list_closed(&db, &[], &opts(5, &[]), &root).unwrap();
+        assert_eq!(ids(&got), [U3]);
+    }
+
+    #[test]
+    fn skips_folders_and_config_dirs_that_cannot_be_typed_safely() {
+        let root = tmp("unsafe");
+        let db = Db::open(":memory:").unwrap();
+        let codex = source(&db, "codex", None);
+        let odd = source(&db, "codex", Some("/c/x\\y"));
+        let bad = folder(&root, "a\x03b");
+        let kept = folder(&root, "it's $x `y`");
+        session(&db, codex, Tool::Codex, U1, Some(&bad), None, 30);
+        session(&db, odd, Tool::Codex, U2, Some(&kept), None, 20);
         session(&db, codex, Tool::Codex, U3, Some(&kept), None, 10);
         let got = list_closed(&db, &[], &opts(5, &[]), &root).unwrap();
         assert_eq!(ids(&got), [U3]);

@@ -26,6 +26,15 @@ pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// True when `s` can go into a line that csx types into a terminal, inside
+/// single quotes. A control character would arrive as a keystroke (Ctrl-C,
+/// return) and end the line early. A backslash ends a single-quoted string
+/// early in fish, where `\'` is an escape. Quotes, `$`, backticks and spaces
+/// are fine: single quotes keep them literal in sh, bash, zsh and fish.
+pub fn is_safe_typed_path(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() || c == '\\')
+}
+
 /// The tools whose sessions csx can resume from the index.
 pub const RESUMABLE_TOOLS: &[&str] = &["claude-code", "codex", "devin"];
 
@@ -42,7 +51,8 @@ pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
 }
 
 /// `cd '<cwd>' && [NAME='<value>' ...]<resume command>`: a line that resumes
-/// the session from any folder. `None` when [`resume_command`] is `None`.
+/// the session from any folder. `None` when [`resume_command`] is `None`, or
+/// when `cwd` or a value fails [`is_safe_typed_path`].
 pub fn resume_line(
     tool: &str,
     session_id: &str,
@@ -50,6 +60,10 @@ pub fn resume_line(
     env: &[(&str, String)],
 ) -> Option<String> {
     let command = resume_command(tool, session_id)?;
+    let safe = is_safe_typed_path(cwd) && env.iter().all(|(_, v)| is_safe_typed_path(v));
+    if !safe {
+        return None;
+    }
     let vars: String = env
         .iter()
         .map(|(name, value)| format!("{name}={} ", shell_quote(value)))
@@ -268,6 +282,43 @@ mod tests {
             Some("cd '/Users/me/work/acme' && devin -r swamp-movie")
         );
         assert_eq!(resume_line("gemini", U, "/w", &[]), None);
+    }
+
+    /// Paths that would break out of the typed line: a control character
+    /// arrives as a keystroke (Ctrl-C, return), and a backslash ends a fish
+    /// single-quoted string early.
+    const UNSAFE: &[&str] = &[
+        "/w/a\x03b",
+        "/w/a\nrm -rf ~",
+        "/w/a\rb",
+        "/w/a\x1b[2Jb",
+        "/w/trailing\\",
+        "/w/mid\\dle",
+    ];
+
+    #[test]
+    fn is_safe_typed_path_rejects_control_chars_and_backslashes() {
+        for bad in UNSAFE {
+            assert!(!is_safe_typed_path(bad), "{bad:?}");
+        }
+        for good in ["/Users/me/it's here", "/w/$HOME `x` \"q\"", "/w/café", ""] {
+            assert!(is_safe_typed_path(good), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn resume_line_refuses_unsafe_folders_and_env_values() {
+        for bad in UNSAFE {
+            assert_eq!(resume_line("codex", U, bad, &[]), None, "{bad:?}");
+            let env = [("CODEX_HOME", bad.to_string())];
+            assert_eq!(resume_line("codex", U, "/w", &env), None, "{bad:?}");
+        }
+        assert_eq!(
+            resume_line("codex", U, "/w/$x `y`", &[("CODEX_HOME", "/c/it's".into())]),
+            Some(format!(
+                "cd '/w/$x `y`' && CODEX_HOME='/c/it'\\''s' codex resume {U}"
+            ))
+        );
     }
 
     #[test]
