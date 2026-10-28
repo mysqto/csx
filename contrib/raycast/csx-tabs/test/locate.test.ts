@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { binDirs, csxCandidates, describeFailure, extendedPath } from "../src/lib/locate.ts";
+import { binDirs, csxCandidates, describeFailure, isClosedUnsupported, extendedPath } from "../src/lib/locate.ts";
 
 test("binDirs lists Homebrew, MacPorts and Cargo folders", () => {
   assert.deepEqual(binDirs("/Users/me"), [
@@ -61,4 +61,22 @@ test("describeFailure returns the first stderr line without its prefix", () => {
   assert.equal(describeFailure("error: boom", "x"), "boom");
   assert.equal(describeFailure("plain", "x"), "plain");
   assert.equal(describeFailure("  \n", "Command failed"), "Command failed");
+});
+
+const CLAP_CLOSED =
+  "error: unexpected argument '--closed' found\n\n  tip: a similar argument exists: '--color'\n\nUsage: csx tabs [OPTIONS] [COMMAND]\n\nFor more information, try '--help'.\n";
+const CLAP_OPEN =
+  "error: unrecognized subcommand 'open'\n\nUsage: csx tabs [OPTIONS] [COMMAND]\n\nFor more information, try '--help'.\n";
+const TOO_OLD = "This csx is too old to resume closed sessions. Update csx to 0.3.0 or newer.";
+
+test("isClosedUnsupported spots the --closed rejection only", () => {
+  assert.equal(isClosedUnsupported(CLAP_CLOSED), true);
+  assert.equal(isClosedUnsupported("error: unexpected argument '--agents' found"), false);
+  assert.equal(isClosedUnsupported("csx: boom"), false);
+});
+
+test("describeFailure maps the closed-session errors from clap output", () => {
+  assert.equal(describeFailure(CLAP_CLOSED, "x"), TOO_OLD);
+  assert.equal(describeFailure(CLAP_OPEN, "x"), TOO_OLD);
+  assert.equal(describeFailure("error: unrecognized subcommand 'terminals'\n\nUsage: csx tabs\n", "x"), TOO_OLD);
 });

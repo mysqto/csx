@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTerminals, resumeTitle, savedChoice } from "../src/lib/terminals.ts";
+import { parseTerminals, resumeFailure, resumeTitle, savedChoice } from "../src/lib/terminals.ts";
 
 const installed = [
   { id: "ghostty", name: "Ghostty" },
@@ -34,4 +34,10 @@ test("savedChoice is undefined when unsaved or no longer installed", () => {
   assert.equal(savedChoice(undefined, installed), undefined);
   assert.equal(savedChoice("", installed), undefined);
   assert.equal(savedChoice("wezterm", installed), undefined);
+});
+
+test("resumeFailure trims one trailing period and adds the hint", () => {
+  assert.equal(resumeFailure("no tab opened."), "no tab opened. Use Resume in Another Terminal to pick another.");
+  assert.equal(resumeFailure("no tab opened"), "no tab opened. Use Resume in Another Terminal to pick another.");
+  assert.equal(resumeFailure("no tab opened.\n"), "no tab opened. Use Resume in Another Terminal to pick another.");
 });

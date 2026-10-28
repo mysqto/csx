@@ -211,7 +211,7 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
     },
   });
   const { value: savedId, setValue: saveId } = useLocalStorage<string>(TERMINAL_KEY);
-  const terminals = usePromise(listTerminals, [], { execute: agentsOnly });
+  const terminals = usePromise(listTerminals, [], { execute: agentsOnly, onError: () => {} });
   const saved = savedChoice(savedId, terminals.data ?? []);
   const rows = data?.rows ?? [];
   const closed = data?.closed ?? [];

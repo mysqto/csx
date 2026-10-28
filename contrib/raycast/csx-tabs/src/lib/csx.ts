@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { getPreferenceValues } from "@raycast/api";
-import { csxCandidates, describeFailure, extendedPath } from "./locate";
+import { csxCandidates, describeFailure, extendedPath, isClosedUnsupported } from "./locate";
 import { parseReport, Report } from "./rows";
 import { parseTerminals, TerminalChoice } from "./terminals";
 
@@ -12,6 +12,18 @@ export class CsxMissingError extends Error {
     super("csx is not installed");
   }
 }
+
+/** A failed csx run, with the raw stderr kept for detection. */
+class RunError extends Error {
+  constructor(
+    message: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+  }
+}
+
+const CLOSED_UNSUPPORTED_WARNING = "Update csx to 0.3.0 or newer to resume closed sessions.";
 
 function isExecutable(path: string): boolean {
   try {
@@ -34,7 +46,7 @@ function run(args: string[], timeout: number): Promise<string> {
   const env = { ...process.env, PATH: extendedPath(homedir(), process.env.PATH) };
   return new Promise((resolve, reject) => {
     execFile(bin, args, { env, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(describeFailure(String(stderr), err.message, err.killed)));
+      if (err) reject(new RunError(describeFailure(String(stderr), err.message, err.killed), String(stderr)));
       else resolve(String(stdout));
     });
   });
@@ -42,8 +54,15 @@ function run(args: string[], timeout: number): Promise<string> {
 
 /** List tabs; only those that run an agent, plus closed sessions, when `agentsOnly`. */
 export async function listTabs(agentsOnly: boolean): Promise<Report> {
-  const args = ["tabs", "--json", ...(agentsOnly ? ["--agents", "--closed", "--closed-limit", "200"] : [])];
-  return parseReport(await run(args, 60_000));
+  if (!agentsOnly) return parseReport(await run(["tabs", "--json"], 60_000));
+  try {
+    return parseReport(await run(["tabs", "--json", "--agents", "--closed", "--closed-limit", "200"], 60_000));
+  } catch (e) {
+    if (!(e instanceof RunError && isClosedUnsupported(e.stderr))) throw e;
+    // csx before 0.3.0 lists open tabs only.
+    const report = parseReport(await run(["tabs", "--json", "--agents"], 60_000));
+    return { ...report, warnings: [...report.warnings, CLOSED_UNSUPPORTED_WARNING] };
+  }
 }
 
 /** Bring the tab named by `ref` to the front. */

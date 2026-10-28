@@ -24,7 +24,7 @@ The first time, the extension asks which terminal to use. It lists only the term
 
 ## Setup
 
-The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew. Recent Homebrew versions load a cask from a third-party tap only after `brew trust`:
+The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew. Resuming closed sessions needs csx 0.3.0 or newer. With csx 0.2.0 the extension still lists and focuses tabs, and shows a warning that closed sessions need an update. Recent Homebrew versions load a cask from a third-party tap only after `brew trust`:
 
 ```sh
 brew tap mysqto/csx https://github.com/mysqto/csx

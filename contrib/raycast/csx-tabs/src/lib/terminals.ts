@@ -33,3 +33,8 @@ export function resumeTitle(saved: TerminalChoice | undefined): string {
 export function savedChoice(savedId: string | undefined, installed: TerminalChoice[]): TerminalChoice | undefined {
   return savedId ? installed.find((t) => t.id === savedId) : undefined;
 }
+
+/** The HUD text for a failed resume: csx's message, then what to try. */
+export function resumeFailure(message: string): string {
+  return `${message.trim().replace(/\.$/, "")}. Use Resume in Another Terminal to pick another.`;
+}

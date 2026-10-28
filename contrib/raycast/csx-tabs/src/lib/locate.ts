@@ -20,6 +20,13 @@ export function extendedPath(home: string, path: string | undefined): string {
   return [...new Set(parts.filter(Boolean))].join(":");
 }
 
+const TOO_OLD_CLOSED = "This csx is too old to resume closed sessions. Update csx to 0.3.0 or newer.";
+
+/** True when csx rejected `--closed`: it is older than 0.3.0. */
+export function isClosedUnsupported(stderr: string): boolean {
+  return /unexpected argument '--closed'/.test(stderr);
+}
+
 /** Error text from a failed csx run, mapped to what the user should do.
  * `killed` is true when the timeout stopped csx. */
 export function describeFailure(stderr: string, message: string, killed = false): string {
@@ -28,6 +35,9 @@ export function describeFailure(stderr: string, message: string, killed = false)
   }
   if (/unrecognized subcommand 'tabs'|unexpected argument '--agents'/.test(stderr)) {
     return "This csx is too old for tabs. Update csx to 0.2.0 or newer.";
+  }
+  if (/unexpected argument '--closed'|unrecognized subcommand '(open|terminals)'/.test(stderr)) {
+    return TOO_OLD_CLOSED;
   }
   const line = stderr
     .split("\n")
