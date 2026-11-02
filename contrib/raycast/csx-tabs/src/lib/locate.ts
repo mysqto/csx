@@ -27,6 +27,11 @@ export function isClosedUnsupported(stderr: string): boolean {
   return /unexpected argument '--closed'/.test(stderr);
 }
 
+/** True when csx rejected `--automated`: it is older than 0.3.0. */
+export function isAutomatedUnsupported(stderr: string): boolean {
+  return /unexpected argument '--automated'/.test(stderr);
+}
+
 /** Error text from a failed csx run, mapped to what the user should do.
  * `killed` is true when the timeout stopped csx. */
 export function describeFailure(stderr: string, message: string, killed = false): string {

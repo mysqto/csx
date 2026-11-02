@@ -22,6 +22,10 @@ The first time, the extension asks which terminal to use. It lists only the term
 - If the session already runs in a tab, csx brings that tab to the front.
 - If the open fails, a message tells you why. Use Resume in Another Terminal to try a different terminal.
 
+## Automated sessions
+
+Both commands hide sessions that a program or another AI agent started, such as print mode, SDK runs, review jobs and subagents. To show them, turn on Show Automated Sessions in the extension preferences. Such a session then has an `automated` or `subagent` tag. This needs csx 0.3.0 or newer.
+
 ## Setup
 
 The extension uses the [csx](https://github.com/mysqto/csx) command line tool. Install csx 0.2.0 or newer with Homebrew. Resuming closed sessions needs csx 0.3.0 or newer. With csx 0.2.0 the extension still lists and focuses tabs, and shows a warning that closed sessions need an update. Recent Homebrew versions load a cask from a third-party tap only after `brew trust`:

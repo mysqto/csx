@@ -217,6 +217,7 @@ csx tabs --json               # {"rows": [...], "warnings": [...]}
 csx tabs --alfred             # Alfred script filter JSON
 csx tabs --closed             # also list closed sessions you can resume
 csx tabs --closed --closed-limit 20  # list at most 20 closed sessions
+csx tabs --closed --automated # also list sessions that a program started
 csx tabs focus <ref>          # bring one tab to the front
 csx tabs terminals --json     # installed terminals that `open` can use
 csx tabs open --terminal ghostty codex <session id>  # resume in a new tab
@@ -254,6 +255,50 @@ starts `csx sync` in the background. It does not start a second sync while a
 `~/.csx/sync.lock` file is younger than 5 minutes. `csx sync` and `csx serve`
 update the stamp too. The list you see now can be a little old. The next
 call shows the new sessions.
+
+### Your sessions and automated sessions
+
+Some sessions are not yours. A script, an SDK or another AI agent started
+them. Examples are `claude -p`, `codex exec`, review jobs that a hook starts,
+and subagents. `csx tabs` hides these agents and sessions. Add `--automated`
+to show them too. In that case, the Alfred subtitle and the table name the
+origin, for example `automated` or `subagent`.
+
+Each agent and each closed session has an `origin` in the JSON:
+
+| `origin`      | Meaning                                                        |
+| ------------- | -------------------------------------------------------------- |
+| `"user"`      | You started it in a terminal or an editor.                     |
+| `"automated"` | A program started it: print mode, an SDK, `codex exec`.        |
+| `"subagent"`  | Another AI agent started it.                                   |
+| `null`        | csx cannot tell. These rows are always shown.                  |
+
+For indexed sessions, csx reads the origin from the session files:
+
+| Tool        | Source of the origin                                                       |
+| ----------- | -------------------------------------------------------------------------- |
+| Claude Code | `entrypoint`: `cli` and editor values are yours, `sdk-*` values are automated. |
+| Codex       | `session_meta.source`: `cli` and `vscode` are yours, `exec` and `mcp` are automated, `subagent` is a subagent. |
+| Devin       | Devin records no origin, so Devin sessions are always shown.               |
+
+Claude Code writes each subagent to its own file under the session folder.
+csx keeps those messages with the parent session, but it does not count the
+subagent prompts as your prompts. Titles, last prompts and search use only
+what you typed.
+
+For running agents, csx reads the process list. This works for every agent
+that csx knows:
+
+- An agent that another agent process started is a subagent. One exception
+  is a launcher: an `npm` wrapper of the same tool, such as `node .../codex`.
+- `claude -p`, `claude --print`, `devin -p`, `devin --print` and
+  `codex exec` are automated.
+
+If a session runs in a hidden agent, it still does not show as closed.
+
+After an upgrade that changes how csx reads sessions, the next `csx sync`
+reads the affected sessions again. csx replaces each session in one step, so
+the lists show the old data until the new data is ready.
 
 ### Resume a closed session
 
@@ -397,6 +442,10 @@ csx 0.3.0 or newer.
 To set the terminal yourself, open Alfred Preferences, then Workflows, then
 csx tabs, then Configure Workflow. Change the setting "Terminal". If an open
 fails, Alfred shows the error and saves nothing.
+
+The lists hide sessions that a program or another agent started (see "Your
+sessions and automated sessions"). To show them, tick "Show automated
+sessions" in Configure Workflow. `csx alfred install` keeps this setting.
 
 Alfred does not read your shell `PATH`. The workflow looks for `csx` in the
 usual install folders. If yours is elsewhere, set the `csx_path` workflow

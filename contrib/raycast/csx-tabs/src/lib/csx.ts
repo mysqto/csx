@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { getPreferenceValues } from "@raycast/api";
-import { csxCandidates, describeFailure, extendedPath, isClosedUnsupported } from "./locate";
+import { csxCandidates, describeFailure, extendedPath, isAutomatedUnsupported, isClosedUnsupported } from "./locate";
 import { parseReport, Report } from "./rows";
 import { parseTerminals, TerminalChoice } from "./terminals";
 
@@ -52,15 +52,24 @@ function run(args: string[], timeout: number): Promise<string> {
   });
 }
 
-/** List tabs; only those that run an agent, plus closed sessions, when `agentsOnly`. */
-export async function listTabs(agentsOnly: boolean): Promise<Report> {
-  if (!agentsOnly) return parseReport(await run(["tabs", "--json"], 60_000));
+/** True when `e` says that csx is older than 0.3.0. */
+function isBefore030(e: unknown): boolean {
+  return e instanceof RunError && (isClosedUnsupported(e.stderr) || isAutomatedUnsupported(e.stderr));
+}
+
+/** List tabs; only those that run an agent, plus closed sessions, when
+ * `agentsOnly`. `automated` also lists agents and sessions that a program or
+ * another agent started. */
+export async function listTabs(agentsOnly: boolean, automated = false): Promise<Report> {
+  const extra = automated ? ["--automated"] : [];
+  const args = agentsOnly ? ["--agents", "--closed", "--closed-limit", "200", ...extra] : extra;
   try {
-    return parseReport(await run(["tabs", "--json", "--agents", "--closed", "--closed-limit", "200"], 60_000));
+    return parseReport(await run(["tabs", "--json", ...args], 60_000));
   } catch (e) {
-    if (!(e instanceof RunError && isClosedUnsupported(e.stderr))) throw e;
-    // csx before 0.3.0 lists open tabs only.
-    const report = parseReport(await run(["tabs", "--json", "--agents"], 60_000));
+    if (!isBefore030(e)) throw e;
+    // csx before 0.3.0 lists open tabs only, and every agent.
+    const report = parseReport(await run(agentsOnly ? ["tabs", "--json", "--agents"] : ["tabs", "--json"], 60_000));
+    if (!agentsOnly) return report;
     return { ...report, warnings: [...report.warnings, CLOSED_UNSUPPORTED_WARNING] };
   }
 }

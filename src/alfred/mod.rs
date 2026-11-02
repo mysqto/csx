@@ -1275,9 +1275,19 @@ printf 'osascript' >> "$STUB_LOG"; for a in "$@"; do printf ' [%s]' "$a" >> "$ST
         /// Run `open.sh` with `args` and only the given variables set; the
         /// stdout and the stub log.
         fn run(&self, args: &[&str], vars: &[(&str, &str)]) -> (String, String) {
+            self.run_script("open.sh", args, vars)
+        }
+
+        /// Run workflow script `script` like [`Shell::run`].
+        fn run_script(
+            &self,
+            script: &str,
+            args: &[&str],
+            vars: &[(&str, &str)],
+        ) -> (String, String) {
             let bin = self.dir.join("bin");
             let out = std::process::Command::new("/bin/sh")
-                .arg(self.dir.join("open.sh"))
+                .arg(self.dir.join(script))
                 .args(args)
                 .env_clear()
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -1287,11 +1297,52 @@ printf 'osascript' >> "$STUB_LOG"; for a in "$@"; do printf ' [%s]' "$a" >> "$ST
                 .envs(vars.iter().copied())
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "open.sh exited {:?}", out.status);
+            assert!(out.status.success(), "{script} exited {:?}", out.status);
             let log = std::fs::read_to_string(self.dir.join("log")).unwrap();
             std::fs::write(self.dir.join("log"), "").unwrap();
             (String::from_utf8(out.stdout).unwrap(), log)
         }
+    }
+
+    #[test]
+    fn csx_sh_adds_automated_to_the_lists_when_the_setting_is_on() {
+        let sh = Shell::new("automated");
+        let run = |args: &[&str], on: Option<&str>| {
+            let vars: Vec<(&str, &str)> = on.map(|v| ("show_automated", v)).into_iter().collect();
+            sh.run_script("csx.sh", args, &vars).1
+        };
+        assert_eq!(
+            run(&["tabs", "--agents", "--alfred"], Some("1")),
+            "csx [tabs] [--automated] [--agents] [--alfred]\n"
+        );
+        assert_eq!(
+            run(&["tabs", "--alfred"], Some("true")),
+            "csx [tabs] [--automated] [--alfred]\n"
+        );
+        assert_eq!(
+            run(&["tabs", "--alfred"], Some("0")),
+            "csx [tabs] [--alfred]\n"
+        );
+        assert_eq!(run(&["tabs", "--alfred"], None), "csx [tabs] [--alfred]\n");
+        // Subcommands are left alone.
+        assert_eq!(
+            run(&["tabs", "focus", "ghostty:1"], Some("1")),
+            "csx [tabs] [focus] [ghostty:1]\n"
+        );
+        assert_eq!(run(&["sync"], Some("1")), "csx [sync]\n");
+    }
+
+    #[test]
+    fn workflow_has_an_automated_sessions_checkbox() {
+        let v = template_json();
+        let item = v["userconfigurationconfig"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["variable"] == "show_automated")
+            .expect("show_automated configuration");
+        assert_eq!(item["type"], "checkbox");
+        assert_eq!(item["config"]["default"], false);
     }
 
     const HINT: &str = "Ctrl+Return to choose another terminal\n";

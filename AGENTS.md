@@ -144,8 +144,15 @@ does not touch `Tool` in `model.rs`.
    `matches(process)`, and `enrich(process, ctx)` to fill an `AgentInfo`. Read files
    under the injectable paths in `AgentContext`, never a hard-coded `~`.
 3. Register it in `registry()` in `src/agent/mod.rs`.
-4. Test with temp directories and fixture session files. No shim is needed.
-5. Add the tool to the README if users should know about it.
+4. Origin: csx hides agents that a program or another agent started. The
+   process ancestry rule in `agent::detect` covers every tool with no work.
+   If the tool has a print or headless mode, add its flags: override
+   `Agent::origin` (see `automated_if_flag`), or fill `print_markers` for a
+   generic tool. Add only flags that you checked in the tool's own help. If
+   the tool's session data records who started it, set `AgentInfo::origin`
+   in `enrich`; the process result wins when both exist.
+5. Test with temp directories and fixture session files. No shim is needed.
+6. Add the tool to the README if users should know about it.
 
 ---
 
@@ -188,7 +195,14 @@ stable.
    - `parse(&self, f, from_watermark) -> Result<ParsedDelta>` — parse only
      content past the watermark; return normalized `MessageRecord`s, a
      `SessionMeta`, and the `new_watermark`.
+   - Set `SessionMeta::origin` when the transcript records who started the
+     session (`Origin::User`, `Automated` or `Subagent`). Leave it `None`
+     when this parse cannot tell; the index keeps the stored value. Store
+     user-role text that the person did not type (subagent tasks, injected
+     context) as `Role::System`.
    - Optionally override `account()` and `config_dir()`.
+   - Bump `parser_version()` whenever a change alters what `parse` stores.
+     The indexer then reads every session of the source again, in place.
 2. Reuse `source/jsonl.rs` (read-whole / read-from-offset) and
    `source/fileid.rs` (file keys, size/mtime) — do not re-implement them.
 3. Because discovery/parsing read a temp-rootable directory, **no shim is

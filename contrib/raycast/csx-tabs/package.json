@@ -48,6 +48,15 @@
       "type": "textfield",
       "required": false,
       "placeholder": "/opt/homebrew/bin/csx"
+    },
+    {
+      "name": "showAutomated",
+      "title": "Automated Sessions",
+      "label": "Show automated sessions",
+      "description": "Also list sessions that a program or another AI agent started, such as print mode, SDK runs and subagents.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
     }
   ],
   "scripts": {

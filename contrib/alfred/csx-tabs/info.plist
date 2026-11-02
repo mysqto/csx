@@ -768,6 +768,25 @@ The workflow calls csx. Install csx first. Set csx_path if csx is not in a stand
 			<key>variable</key>
 			<string>terminal</string>
 		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>default</key>
+				<false/>
+				<key>required</key>
+				<false/>
+				<key>text</key>
+				<string>Show automated sessions</string>
+			</dict>
+			<key>description</key>
+			<string>Also list sessions that a program or another AI agent started, such as print mode, SDK runs and subagents.</string>
+			<key>label</key>
+			<string>Automated sessions</string>
+			<key>type</key>
+			<string>checkbox</string>
+			<key>variable</key>
+			<string>show_automated</string>
+		</dict>
 	</array>
 	<key>variablesdontexport</key>
 	<array/>

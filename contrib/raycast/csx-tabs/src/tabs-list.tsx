@@ -4,6 +4,7 @@ import {
   ActionPanel,
   closeMainWindow,
   Color,
+  getPreferenceValues,
   Icon,
   Keyboard,
   List,
@@ -19,6 +20,8 @@ import {
   closedKeywords,
   closedPrompt,
   closedTitle,
+  originTag,
+  Origin,
   Row,
   rowCwd,
   rowKey,
@@ -60,8 +63,17 @@ function lastActive(ms: number): List.Item.Accessory {
   return { date, tooltip: `Last active: ${date.toLocaleString()}` };
 }
 
+/** A tag for a session that a program or another agent started; shown only
+ * when the Show Automated Sessions preference is on. */
+function originAccessory(origin: Origin): List.Item.Accessory[] {
+  const tag = originTag(origin);
+  if (!tag) return [];
+  const tooltip = tag === "subagent" ? "Another AI agent started this session" : "A program started this session";
+  return [{ tag: { value: tag, color: Color.SecondaryText }, tooltip }];
+}
+
 function accessories(r: Row): List.Item.Accessory[] {
-  const out = statusAccessory(r);
+  const out = [...originAccessory(r.agent?.origin ?? null), ...statusAccessory(r)];
   if (r.agent?.updated_at) out.push(lastActive(r.agent.updated_at));
   if (r.terminal) out.push({ text: terminalName(r.terminal) });
   return out;
@@ -210,7 +222,8 @@ function ErrorView({ error, reload }: { error: Error; reload: () => void }) {
 }
 
 export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
-  const { data, error, isLoading, revalidate } = usePromise(listTabs, [agentsOnly], {
+  const { showAutomated } = getPreferenceValues<Preferences>();
+  const { data, error, isLoading, revalidate } = usePromise(listTabs, [agentsOnly, showAutomated === true], {
     // The empty view explains a missing csx, so only other errors get a toast.
     onError: (e) => {
       if (!(e instanceof CsxMissingError)) showFailureToast(e, { title: "csx failed" });
@@ -273,7 +286,7 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
               title={closedTitle(c)}
               subtitle={closedSubtitle(c)}
               keywords={closedKeywords(c)}
-              accessories={c.updated_at ? [lastActive(c.updated_at)] : []}
+              accessories={[...originAccessory(c.origin), ...(c.updated_at ? [lastActive(c.updated_at)] : [])]}
               actions={<ClosedActions session={c} saved={saved} savedId={savedId} onSaved={saveId} />}
             />
           ))}

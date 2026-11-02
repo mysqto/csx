@@ -55,9 +55,7 @@
       }
     }
   ],
-  "warnings": [
-    "kitty: remote control is off"
-  ],
+  "warnings": ["kitty: remote control is off"],
   "closed": [
     {
       "tool": "claude-code",

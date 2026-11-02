@@ -39,6 +39,19 @@ All notable changes to csx are documented here. The format follows
   terminal and saves it. In Alfred, Ctrl+Return picks a terminal for one
   session. In Raycast, use Resume in Another Terminal. The Alfred workflow
   gets a "Terminal" setting.
+- **Only your sessions by default.** csx records who started each session:
+  you, a program (`claude -p`, an SDK, `codex exec`) or another agent. It
+  reads Claude Code `entrypoint`, Codex `session_meta.source` and, for
+  running agents of every tool, the process ancestry and print-mode flags.
+  `csx tabs`, Alfred and Raycast hide automated and subagent sessions. Use
+  `csx tabs --automated`, or the "Show automated sessions" setting in Alfred
+  and Raycast, to show them. JSON rows and closed sessions gain `origin`.
+- **Subagent prompts no longer count as yours.** Claude Code subagent files
+  stay with their parent session, but their prompts are stored as system
+  messages. Titles, last prompts and search show only what you typed.
+- **Sessions are read again after a parser change.** Each source has a
+  parser version. The next `csx sync` reads sessions from older versions
+  again, one session per transaction, so lists never show a gap.
 - **Alfred shows the last active time.** Open AI session rows and closed
   sessions show how long ago the session was last active, for example
   `5m ago` or `2d ago`. Raycast shows it as a date on the right, with the full

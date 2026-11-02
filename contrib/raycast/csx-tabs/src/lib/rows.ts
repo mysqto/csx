@@ -3,6 +3,10 @@
 
 export type AgentStatus = "busy" | "idle" | "unknown";
 
+/** Who started a session: the person, a program, or another agent. `null`
+ * when csx could not tell. */
+export type Origin = "user" | "automated" | "subagent" | null;
+
 export interface Agent {
   tool: string;
   pid: number;
@@ -14,6 +18,7 @@ export interface Agent {
   status: AgentStatus;
   updated_at: number | null;
   resume_command: string | null;
+  origin: Origin;
 }
 
 export interface Row {
@@ -36,6 +41,7 @@ export interface ClosedSession {
   last_prompt: string | null;
   updated_at: number | null;
   resume_command: string;
+  origin: Origin;
 }
 
 export interface Report {
@@ -83,6 +89,16 @@ function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+function parseOrigin(v: unknown): Origin {
+  return v === "user" || v === "automated" || v === "subagent" ? v : null;
+}
+
+/** The origin word to show for a session that csx hides by default
+ * (`automated` or `subagent`), else null. */
+export function originTag(origin: Origin): string | null {
+  return origin === "automated" || origin === "subagent" ? origin : null;
+}
+
 function parseAgent(v: unknown): Agent | null {
   if (!isObject(v) || typeof v.tool !== "string") return null;
   const status = v.status === "busy" || v.status === "idle" ? v.status : "unknown";
@@ -97,6 +113,7 @@ function parseAgent(v: unknown): Agent | null {
     status,
     updated_at: num(v.updated_at),
     resume_command: str(v.resume_command),
+    origin: parseOrigin(v.origin),
   };
 }
 
@@ -124,6 +141,7 @@ function parseClosed(v: unknown): ClosedSession | null {
     last_prompt: str(v.last_prompt),
     updated_at: num(v.updated_at),
     resume_command: str(v.resume_command) ?? "",
+    origin: parseOrigin(v.origin),
   };
 }
 

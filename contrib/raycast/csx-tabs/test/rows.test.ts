@@ -5,6 +5,7 @@ import {
   closedKeywords,
   closedTitle,
   cut,
+  originTag,
   oneLine,
   parseReport,
   rowCwd,
@@ -37,6 +38,7 @@ const agentRow = {
     status: "busy",
     updated_at: 1793156134829,
     resume_command: "cd '/Users/me/work/acme' && claude --resume 0f1e2d3c",
+    origin: "user",
   },
 };
 
@@ -184,7 +186,35 @@ const closedEntry = {
   last_prompt: "make the\n toggle persist",
   updated_at: 1793150000000,
   resume_command: "cd '/Users/me/work/acme-web' && claude --resume 4a5b6c7d",
+  origin: null,
 };
+
+test("parseReport reads origins and drops unknown values", () => {
+  const agent = (origin: unknown) => ({ ...agentRow, agent: { ...agentRow.agent, origin } });
+  const text = JSON.stringify({
+    rows: [agent("automated"), agent("robot"), agent(undefined)],
+    closed: [
+      { ...closedEntry, origin: "subagent" },
+      { ...closedEntry, origin: 3 },
+    ],
+  });
+  const r = parseReport(text);
+  assert.deepEqual(
+    r.rows.map((x) => x.agent?.origin),
+    ["automated", null, null],
+  );
+  assert.deepEqual(
+    r.closed.map((c) => c.origin),
+    ["subagent", null],
+  );
+});
+
+test("originTag names only the origins that csx hides by default", () => {
+  assert.equal(originTag("automated"), "automated");
+  assert.equal(originTag("subagent"), "subagent");
+  assert.equal(originTag("user"), null);
+  assert.equal(originTag(null), null);
+});
 
 test("parseReport has an empty closed list when the key is absent", () => {
   assert.deepEqual(parseReport(report([plainRow])).closed, []);

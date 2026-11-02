@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { binDirs, csxCandidates, describeFailure, isClosedUnsupported, extendedPath } from "../src/lib/locate.ts";
+import {
+  binDirs,
+  csxCandidates,
+  describeFailure,
+  isAutomatedUnsupported,
+  isClosedUnsupported,
+  extendedPath,
+} from "../src/lib/locate.ts";
 
 test("binDirs lists Homebrew, MacPorts and Cargo folders", () => {
   assert.deepEqual(binDirs("/Users/me"), [
@@ -73,6 +80,11 @@ test("isClosedUnsupported spots the --closed rejection only", () => {
   assert.equal(isClosedUnsupported(CLAP_CLOSED), true);
   assert.equal(isClosedUnsupported("error: unexpected argument '--agents' found"), false);
   assert.equal(isClosedUnsupported("csx: boom"), false);
+});
+
+test("isAutomatedUnsupported spots the --automated rejection only", () => {
+  assert.equal(isAutomatedUnsupported("error: unexpected argument '--automated' found"), true);
+  assert.equal(isAutomatedUnsupported(CLAP_CLOSED), false);
 });
 
 test("describeFailure maps the closed-session errors from clap output", () => {
