@@ -455,6 +455,7 @@ mod tests {
             account: None,
             first_ts: 100,
             last_ts: 100,
+            origin: None,
         }
     }
 

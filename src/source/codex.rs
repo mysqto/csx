@@ -19,7 +19,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::error::Result;
-use crate::model::{Account, MessageRecord, Role, SessionMeta, Tool};
+use crate::model::{Account, MessageRecord, Origin, Role, SessionMeta, Tool};
 use crate::source::claude::parse_iso8601_secs;
 use crate::source::fileid::{file_key, size_and_mtime};
 use crate::source::jsonl::read_from_offset;
@@ -120,6 +120,11 @@ impl SessionSource for CodexSource {
         Ok(map_events(&chunk.values, chunk.new_offset))
     }
 
+    /// 1: session origin from `session_meta`.
+    fn parser_version(&self) -> u32 {
+        1
+    }
+
     fn config_dir(&self) -> Option<String> {
         Some(self.root.to_string_lossy().into_owned())
     }
@@ -134,6 +139,7 @@ fn map_events(values: &[Value], new_offset: u64) -> ParsedDelta {
     let mut first_ts: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
     let mut seq: u64 = 0;
+    let mut origin: Option<Origin> = None;
 
     for value in values {
         let ts = event_ts(value);
@@ -143,6 +149,7 @@ fn map_events(values: &[Value], new_offset: u64) -> ParsedDelta {
         match etype.as_deref() {
             Some("session_meta") | Some("session") => {
                 absorb_session_meta(payload, &mut session_id, &mut project_path, &mut git_branch);
+                origin = origin.or_else(|| meta_origin(payload));
             }
             Some("response_item")
             | Some("message")
@@ -173,12 +180,31 @@ fn map_events(values: &[Value], new_offset: u64) -> ParsedDelta {
         account: None,
         first_ts: first_ts.unwrap_or(0),
         last_ts: last_ts.unwrap_or(0),
+        origin,
     };
 
     ParsedDelta {
         messages,
         session,
         new_watermark: new_offset,
+    }
+}
+
+/// Who started a Codex session, from its `session_meta` payload. `source` is
+/// `cli` or `vscode` for the person, `exec` or `mcp` for a program, and an
+/// object with a `subagent` key for a subagent thread. Without `source`, an
+/// `originator` of `codex_exec` is a program. Anything else is unknown.
+fn meta_origin(payload: &Value) -> Option<Origin> {
+    match payload.get("source") {
+        Some(Value::String(s)) => match s.as_str() {
+            "cli" | "vscode" => Some(Origin::User),
+            "exec" | "mcp" => Some(Origin::Automated),
+            _ => None,
+        },
+        Some(Value::Object(o)) if o.contains_key("subagent") => Some(Origin::Subagent),
+        Some(_) => None,
+        None => (str_field(payload, "originator").as_deref() == Some("codex_exec"))
+            .then_some(Origin::Automated),
     }
 }
 
@@ -333,6 +359,62 @@ fn str_field(value: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meta_origin_reads_source_then_originator() {
+        let o = |v: Value| meta_origin(&v);
+        assert_eq!(o(serde_json::json!({"source": "cli"})), Some(Origin::User));
+        assert_eq!(
+            o(serde_json::json!({"source": "vscode"})),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            o(serde_json::json!({"source": "exec"})),
+            Some(Origin::Automated)
+        );
+        assert_eq!(
+            o(serde_json::json!({"source": "mcp"})),
+            Some(Origin::Automated)
+        );
+        assert_eq!(
+            o(serde_json::json!({"source": {"subagent": {"thread_spawn": {"depth": 1}}}})),
+            Some(Origin::Subagent)
+        );
+        assert_eq!(o(serde_json::json!({"source": {"other": 1}})), None);
+        assert_eq!(o(serde_json::json!({"source": "unknown"})), None);
+        assert_eq!(o(serde_json::json!({"source": 3})), None);
+        // `source` wins over `originator`.
+        assert_eq!(
+            o(serde_json::json!({"source": "cli", "originator": "codex_exec"})),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            o(serde_json::json!({"originator": "codex_exec"})),
+            Some(Origin::Automated)
+        );
+        assert_eq!(o(serde_json::json!({"originator": "codex-tui"})), None);
+        assert_eq!(o(serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn map_events_sets_origin_from_session_meta_only() {
+        let meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": "s", "cwd": "/p", "source": "exec"}
+        });
+        let item = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}
+        });
+        assert_eq!(
+            map_events(&[meta, item.clone()], 1).session.origin,
+            Some(Origin::Automated)
+        );
+        // A later part of the file has no session_meta: origin unknown.
+        assert_eq!(map_events(&[item], 1).session.origin, None);
+        assert_eq!(CodexSource::new("/x").parser_version(), 1);
+    }
 
     fn fixtures_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

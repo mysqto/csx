@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS files (
     size       INTEGER,
     mtime      INTEGER,
     watermark  INTEGER DEFAULT 0,
-    session_id TEXT
+    session_id TEXT,
+    parser_version INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -49,7 +50,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_ts     INTEGER,
     last_ts      INTEGER,
     msg_count    INTEGER,
-    summary      TEXT
+    summary      TEXT,
+    origin       TEXT
 );
 CREATE INDEX IF NOT EXISTS sess_repo ON sessions(repo_id);
 
@@ -87,6 +89,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_trg USING fts5(
     tokenize='trigram'
 );
 "#;
+
+/// Columns added after the first release, as `(table, column, declaration)`.
+/// [`Db::init_schema`] adds each one that an older database lacks.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("sessions", "origin", "TEXT"),
+    ("files", "parser_version", "INTEGER DEFAULT 0"),
+];
 
 /// A row identifying a source (account + tool + config location).
 ///
@@ -128,6 +137,8 @@ pub struct FileRow {
     pub mtime: i64,
     /// Opaque parse watermark.
     pub watermark: i64,
+    /// The source's parser version when the file was last read.
+    pub parser_version: i64,
     /// Session this file belongs to, when known.
     pub session_id: Option<String>,
 }
@@ -342,10 +353,27 @@ impl Db {
         out
     }
 
-    /// Create every table and index if absent. Idempotent.
+    /// Create every table and index if absent, then add the
+    /// [`ADDED_COLUMNS`] that an older database lacks. Idempotent.
     pub fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch(SCHEMA)?;
+        for (table, column, decl) in ADDED_COLUMNS {
+            if !self.has_column(table, column)? {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+            }
+        }
         Ok(())
+    }
+
+    /// True when `table` has a column named `column`.
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            params![table, column],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     /// Insert a source and return its new id.
@@ -385,8 +413,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sessions
                 (session_id, source_id, tool, repo_id, project_path,
-                 project_name, git_branch, first_ts, last_ts, msg_count, summary)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 project_name, git_branch, first_ts, last_ts, msg_count, summary, origin)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(session_id) DO UPDATE SET
                 source_id    = excluded.source_id,
                 tool         = excluded.tool,
@@ -397,7 +425,8 @@ impl Db {
                 first_ts     = MIN(sessions.first_ts, excluded.first_ts),
                 last_ts      = MAX(sessions.last_ts, excluded.last_ts),
                 msg_count    = excluded.msg_count,
-                summary      = excluded.summary",
+                summary      = excluded.summary,
+                origin       = COALESCE(excluded.origin, sessions.origin)",
             params![
                 meta.session_id,
                 source_id,
@@ -410,6 +439,7 @@ impl Db {
                 meta.last_ts,
                 msg_count,
                 summary,
+                meta.origin.map(|o| o.as_str()),
             ],
         )?;
         Ok(())
@@ -491,7 +521,8 @@ impl Db {
         let row = self
             .conn
             .query_row(
-                "SELECT id, source_id, path, file_key, size, mtime, watermark, session_id
+                "SELECT id, source_id, path, file_key, size, mtime, watermark, session_id,
+                        COALESCE(parser_version, 0)
                  FROM files WHERE file_key = ?1",
                 params![file_key],
                 |r| {
@@ -504,6 +535,7 @@ impl Db {
                         mtime: r.get(5)?,
                         watermark: r.get(6)?,
                         session_id: r.get(7)?,
+                        parser_version: r.get(8)?,
                     })
                 },
             )
@@ -548,6 +580,75 @@ impl Db {
             params![file_key, watermark],
         )?;
         Ok(n)
+    }
+
+    /// Record the parser version that last read `file_key`. Returns the
+    /// number of rows updated (0 when the file is not tracked).
+    pub fn set_parser_version(&self, file_key: &str, version: u32) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE files SET parser_version = ?2 WHERE file_key = ?1",
+            params![file_key, version],
+        )?;
+        Ok(n)
+    }
+
+    /// Delete every message of `session_id` so its files can be read again:
+    /// the `messages` and `messages_text` rows, both full-text index entries,
+    /// and stored embeddings. The session row stays, with `msg_count` 0, so
+    /// lists keep showing it until the new messages arrive. Run it inside the
+    /// same transaction as the new inserts.
+    pub fn delete_session_messages(&self, session_id: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, t.body FROM messages m
+             LEFT JOIN messages_text t ON t.id = m.id
+             WHERE m.session_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, body) in &rows {
+            // External-content FTS tables need the old text to delete a row.
+            for table in ["messages_fts", "messages_trg"] {
+                self.conn.execute(
+                    &format!(
+                        "INSERT INTO {table} ({table}, rowid, body) VALUES ('delete', ?1, ?2)"
+                    ),
+                    params![id, body],
+                )?;
+            }
+        }
+        let in_session = "IN (SELECT id FROM messages WHERE session_id = ?1)";
+        if self.has_table("embeddings")? {
+            self.conn.execute(
+                &format!("DELETE FROM embeddings WHERE message_id {in_session}"),
+                params![session_id],
+            )?;
+        }
+        self.conn.execute(
+            &format!("DELETE FROM messages_text WHERE id {in_session}"),
+            params![session_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        self.conn.execute(
+            "UPDATE sessions SET msg_count = 0 WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// True when a table named `name` exists.
+    fn has_table(&self, name: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     /// Full-text (or trigram) search, scoped and ranked.
@@ -923,11 +1024,13 @@ pub struct ResumableSession {
     pub last_ts: Option<i64>,
     /// Config folder of the session's source.
     pub config_dir: Option<String>,
+    /// Who started the session; `None` when unknown.
+    pub origin: Option<crate::model::Origin>,
 }
 
 /// The columns of a [`ResumableSession`], for a `WHERE` to follow.
 const RESUMABLE_SELECT: &str = "SELECT s.session_id, s.tool, s.project_path, s.project_name,
-            s.last_ts, src.config_dir
+            s.last_ts, src.config_dir, s.origin
      FROM sessions s
      LEFT JOIN sources src ON src.id = s.source_id";
 
@@ -946,6 +1049,10 @@ fn resumable_row(r: &rusqlite::Row) -> rusqlite::Result<ResumableSession> {
         project_name: r.get(3)?,
         last_ts: r.get(4)?,
         config_dir: r.get(5)?,
+        origin: r
+            .get::<_, Option<String>>(6)?
+            .as_deref()
+            .and_then(crate::model::Origin::parse),
     })
 }
 
@@ -973,7 +1080,7 @@ pub fn source_row_from_account(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Role, Tool};
+    use crate::model::{Origin, Role, Tool};
 
     #[allow(clippy::too_many_arguments)]
     fn meta(
@@ -996,6 +1103,7 @@ mod tests {
             account: None,
             first_ts,
             last_ts,
+            origin: None,
         }
     }
 
@@ -1417,6 +1525,160 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tn.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn init_schema_adds_new_columns_to_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("csx-db-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.sqlite");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE files (id INTEGER PRIMARY KEY, source_id INTEGER, path TEXT,
+                     file_key TEXT UNIQUE, size INTEGER, mtime INTEGER,
+                     watermark INTEGER DEFAULT 0, session_id TEXT);
+                 INSERT INTO files (source_id, file_key, size, mtime) VALUES (1, 'k', 1, 2);
+                 CREATE TABLE sessions (session_id TEXT PRIMARY KEY, source_id INTEGER,
+                     tool TEXT, repo_id TEXT, project_path TEXT, project_name TEXT,
+                     git_branch TEXT, first_ts INTEGER, last_ts INTEGER,
+                     msg_count INTEGER, summary TEXT);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(path.to_str().unwrap()).unwrap();
+        assert!(db.has_column("sessions", "origin").unwrap());
+        assert!(db.has_column("files", "parser_version").unwrap());
+        // An old file row reads as parser version 0, so it is re-read.
+        assert_eq!(db.get_file("k").unwrap().unwrap().parser_version, 0);
+        // Opening again is a no-op.
+        drop(db);
+        Db::open(path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn upsert_session_keeps_a_known_origin() {
+        let db = Db::open(":memory:").unwrap();
+        let src = db.upsert_source(&SourceRow::default()).unwrap();
+        let mut m = meta("s1", Tool::ClaudeCode, None, None, None, None, 1, 2);
+        let origin = |db: &Db| -> Option<String> {
+            db.conn()
+                .query_row(
+                    "SELECT origin FROM sessions WHERE session_id='s1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db), None);
+        m.origin = Some(Origin::Automated);
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db).as_deref(), Some("automated"));
+        // A later parse that cannot tell keeps the stored origin.
+        m.origin = None;
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db).as_deref(), Some("automated"));
+        let r = db.resumable_session("claude-code", "s1").unwrap().unwrap();
+        assert_eq!(r.origin, Some(Origin::Automated));
+        // An unknown stored value reads as no origin.
+        db.conn()
+            .execute("UPDATE sessions SET origin = 'robot'", [])
+            .unwrap();
+        let r = db.resumable_session("claude-code", "s1").unwrap().unwrap();
+        assert_eq!(r.origin, None);
+    }
+
+    #[test]
+    fn set_parser_version_updates_the_file_row() {
+        let db = Db::open(":memory:").unwrap();
+        assert_eq!(db.set_parser_version("ghost", 1).unwrap(), 0);
+        db.upsert_file(1, Some("/p"), "k", 1, 2, Some("s")).unwrap();
+        assert_eq!(db.get_file("k").unwrap().unwrap().parser_version, 0);
+        assert_eq!(db.set_parser_version("k", 3).unwrap(), 1);
+        assert_eq!(db.get_file("k").unwrap().unwrap().parser_version, 3);
+    }
+
+    #[test]
+    fn delete_session_messages_clears_rows_indexes_and_embeddings() {
+        let (db, _, _) = fixture();
+        let before = ids(&db
+            .search("parser", &Scope::default(), &SearchOpts::default())
+            .unwrap());
+        assert!(before.contains(&"s1".to_string()) && before.contains(&"s2".to_string()));
+        // Without an embeddings table the delete still works.
+        db.delete_session_messages("s2").unwrap();
+        crate::embed::EmbeddingStore::new(&db).init().unwrap();
+        let s1_ids: Vec<i64> = {
+            let mut st = db
+                .conn()
+                .prepare("SELECT id FROM messages WHERE session_id='s1'")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        for id in &s1_ids {
+            crate::embed::EmbeddingStore::new(&db)
+                .put(*id, "m", &[1.0])
+                .unwrap();
+        }
+        db.delete_session_messages("s1").unwrap();
+        for table in ["messages", "embeddings"] {
+            let n: i64 = db
+                .conn()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages_text", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        for code in [false, true] {
+            let opts = SearchOpts {
+                code,
+                ..SearchOpts::default()
+            };
+            assert!(db
+                .search("parser", &Scope::default(), &opts)
+                .unwrap()
+                .is_empty());
+        }
+        // The full-text indexes stay consistent after the deletes.
+        for table in ["messages_fts", "messages_trg"] {
+            db.conn()
+                .execute(
+                    &format!("INSERT INTO {table} ({table}, rank) VALUES ('integrity-check', 1)"),
+                    [],
+                )
+                .unwrap();
+        }
+        assert_eq!(db.session_msg_count("s1").unwrap(), Some(0));
+        // A new insert after the delete is searchable.
+        db.insert_message(
+            1,
+            &msg(
+                "s1",
+                Tool::ClaudeCode,
+                0,
+                9,
+                Role::User,
+                None,
+                "parser again",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&db
+                .search("parser", &Scope::default(), &SearchOpts::default())
+                .unwrap()),
+            vec!["s1".to_string()]
+        );
     }
 
     #[test]
@@ -2037,6 +2299,7 @@ mod tests {
                 project_name: Some("projy".into()),
                 last_ts: Some(400),
                 config_dir: Some("/home/dev/.codex".into()),
+                origin: None,
             }
         );
         assert_eq!(rows[1].project_path, None);

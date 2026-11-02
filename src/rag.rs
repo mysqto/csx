@@ -385,6 +385,7 @@ mod tests {
                     account: None,
                     first_ts: ts,
                     last_ts: ts,
+                    origin: None,
                 },
                 (seq + 1) as i64,
                 None,

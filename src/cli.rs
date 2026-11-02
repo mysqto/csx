@@ -966,6 +966,7 @@ mod tests {
             account: None,
             first_ts: first,
             last_ts: last,
+            origin: None,
         }
     }
 

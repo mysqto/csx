@@ -74,6 +74,50 @@ impl Role {
     }
 }
 
+/// Who started a session or an agent process.
+///
+/// A session with no origin (`None`) is one the tool records nothing about.
+/// It counts as the person's, so csx never hides a session for lack of data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    /// The person started it in a terminal or an editor.
+    User,
+    /// A script or a tool started it with no person typing: print mode, an
+    /// SDK, `codex exec`.
+    Automated,
+    /// Another AI agent started it: a subagent, or a job that an agent ran.
+    Subagent,
+}
+
+impl Origin {
+    /// Stable lowercase identifier used in storage and JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Origin::User => "user",
+            Origin::Automated => "automated",
+            Origin::Subagent => "subagent",
+        }
+    }
+
+    /// Parse an [`Origin`] from its stable identifier; `None` for anything
+    /// else, which reads as unknown.
+    pub fn parse(s: &str) -> Option<Origin> {
+        match s {
+            "user" => Some(Origin::User),
+            "automated" => Some(Origin::Automated),
+            "subagent" => Some(Origin::Subagent),
+            _ => None,
+        }
+    }
+
+    /// True for an origin that lists hide by default: automated or subagent.
+    /// Unknown (`None`) and user are shown.
+    pub fn hidden_by_default(origin: Option<Origin>) -> bool {
+        matches!(origin, Some(Origin::Automated | Origin::Subagent))
+    }
+}
+
 /// Account/identity attribution for a session, all fields best-effort.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Account {
@@ -131,6 +175,10 @@ pub struct SessionMeta {
     pub first_ts: i64,
     /// Unix timestamp (seconds) of the latest message.
     pub last_ts: i64,
+    /// Who started the session, when this parse could tell. `None` keeps the
+    /// origin already stored in the index.
+    #[serde(default)]
+    pub origin: Option<Origin>,
 }
 
 #[cfg(test)]
@@ -152,6 +200,22 @@ mod tests {
         }
         let err = Role::from_str("ghost").unwrap_err();
         assert!(err.to_string().contains("role: ghost"));
+    }
+
+    #[test]
+    fn origin_roundtrip_and_default_visibility() {
+        for o in [Origin::User, Origin::Automated, Origin::Subagent] {
+            assert_eq!(Origin::parse(o.as_str()), Some(o));
+            assert_eq!(
+                serde_json::to_string(&o).unwrap(),
+                format!("\"{}\"", o.as_str())
+            );
+        }
+        assert_eq!(Origin::parse("robot"), None);
+        assert!(!Origin::hidden_by_default(None));
+        assert!(!Origin::hidden_by_default(Some(Origin::User)));
+        assert!(Origin::hidden_by_default(Some(Origin::Automated)));
+        assert!(Origin::hidden_by_default(Some(Origin::Subagent)));
     }
 
     #[test]
@@ -193,6 +257,7 @@ mod tests {
             }),
             first_ts: 1,
             last_ts: 2,
+            origin: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMeta = serde_json::from_str(&json).unwrap();

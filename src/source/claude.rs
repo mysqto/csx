@@ -17,7 +17,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::error::Result;
-use crate::model::{Account, MessageRecord, Role, SessionMeta, Tool};
+use crate::model::{Account, MessageRecord, Origin, Role, SessionMeta, Tool};
 use crate::source::fileid::{file_key, size_and_mtime};
 use crate::source::jsonl::{read_from_offset, read_json_file};
 use crate::source::{ParsedDelta, SessionFile, SessionSource};
@@ -159,6 +159,23 @@ impl SessionSource for ClaudeSource {
     fn config_dir(&self) -> Option<String> {
         Some(self.root.to_string_lossy().into_owned())
     }
+
+    /// 1: session origin from `entrypoint`, and subagent prompts stored as
+    /// `system` instead of `user`.
+    fn parser_version(&self) -> u32 {
+        1
+    }
+}
+
+/// The origin that a Claude Code `entrypoint` value records: a value that
+/// starts with `sdk-` (the Agent SDK, `claude -p`) is automated, any other
+/// value (`cli`, `claude-vscode`, `claude-desktop`) is the person's.
+fn origin_from_entrypoint(entrypoint: &str) -> Origin {
+    if entrypoint.starts_with("sdk-") {
+        Origin::Automated
+    } else {
+        Origin::User
+    }
 }
 
 /// Map a batch of Claude JSONL event values into a [`ParsedDelta`].
@@ -181,8 +198,17 @@ fn map_events(
     let mut first_ts: Option<i64> = None;
     let mut last_ts: Option<i64> = None;
     let mut seq: u64 = 0;
+    let mut origin: Option<Origin> = None;
 
     for value in values {
+        // A subagent writes its own file (`<session>/subagents/*.jsonl`) with
+        // the parent's session id and `isSidechain: true`. Its events say
+        // nothing about who started the session, and its user-role text is
+        // the parent agent's task prompt, not the person's.
+        let sidechain = value.get("isSidechain").and_then(Value::as_bool) == Some(true);
+        if origin.is_none() && !sidechain {
+            origin = str_field(value, "entrypoint").map(|e| origin_from_entrypoint(&e));
+        }
         // Every event that carries a sessionId contributes it.
         if session_id.is_none() {
             if let Some(sid) = str_field(value, "sessionId") {
@@ -208,6 +234,7 @@ fn map_events(
         // Only `user` and `assistant` event types carry a `message` object we
         // turn into records. Everything else is metadata-only.
         let role = match event_type.as_deref() {
+            Some("user") if sidechain => Role::System,
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
             _ => continue,
@@ -238,6 +265,7 @@ fn map_events(
         account,
         first_ts: first_ts.unwrap_or(0),
         last_ts: last_ts.unwrap_or(0),
+        origin,
     };
 
     ParsedDelta {
@@ -650,6 +678,96 @@ mod tests {
         assert_eq!(delta.session.project_path.as_deref(), Some("/proj"));
         assert_eq!(delta.session.git_branch.as_deref(), Some("main"));
         assert!(delta.session.last_ts > delta.session.first_ts);
+    }
+
+    #[test]
+    fn map_events_reads_origin_from_entrypoint() {
+        let ev = |entrypoint: Option<&str>, sidechain: Option<bool>| {
+            let mut v = serde_json::json!({
+                "type": "user",
+                "sessionId": "s",
+                "timestamp": "2020-01-01T00:00:10Z",
+                "message": {"role": "user", "content": "hi"}
+            });
+            if let Some(e) = entrypoint {
+                v["entrypoint"] = e.into();
+            }
+            if let Some(sc) = sidechain {
+                v["isSidechain"] = sc.into();
+            }
+            v
+        };
+        let origin = |events: Vec<Value>| map_events(&events, 0, 1, None).session.origin;
+        assert_eq!(
+            origin(vec![ev(Some("cli"), Some(false))]),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            origin(vec![ev(Some("claude-vscode"), None)]),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            origin(vec![ev(Some("sdk-py"), None)]),
+            Some(Origin::Automated)
+        );
+        assert_eq!(
+            origin(vec![ev(Some("sdk-cli"), None)]),
+            Some(Origin::Automated)
+        );
+        assert_eq!(origin(vec![ev(None, None)]), None);
+        assert_eq!(origin(vec![]), None);
+        // A subagent file never decides the origin, even with an entrypoint.
+        assert_eq!(origin(vec![ev(Some("cli"), Some(true))]), None);
+        // The first event with an entrypoint wins.
+        assert_eq!(
+            origin(vec![
+                ev(None, None),
+                ev(Some("sdk-ts"), None),
+                ev(Some("cli"), None)
+            ]),
+            Some(Origin::Automated)
+        );
+    }
+
+    #[test]
+    fn map_events_stores_subagent_prompts_as_system() {
+        let events = vec![
+            serde_json::json!({
+                "type": "user", "isSidechain": true, "sessionId": "s",
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "Task: review the diff"},
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                ]}
+            }),
+            serde_json::json!({
+                "type": "assistant", "isSidechain": true, "sessionId": "s",
+                "message": {"role": "assistant", "content": "Looks fine"}
+            }),
+            serde_json::json!({
+                "type": "user", "isSidechain": false, "sessionId": "s",
+                "message": {"role": "user", "content": "my own prompt"}
+            }),
+        ];
+        let delta = map_events(&events, 0, 1, None);
+        let roles: Vec<(Role, &str)> = delta
+            .messages
+            .iter()
+            .map(|m| (m.role, m.text.as_str()))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                (Role::System, "Task: review the diff"),
+                (Role::Tool, "ok"),
+                (Role::Assistant, "Looks fine"),
+                (Role::User, "my own prompt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_parser_version_is_one() {
+        assert_eq!(ClaudeSource::new("/x").parser_version(), 1);
     }
 
     #[test]

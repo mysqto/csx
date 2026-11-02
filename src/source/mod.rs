@@ -68,6 +68,14 @@ pub trait SessionSource {
     fn config_dir(&self) -> Option<String> {
         None
     }
+
+    /// The version of what [`SessionSource::parse`] stores. Bump it whenever
+    /// a change to the parser changes the stored messages or session fields:
+    /// the indexer then reads every file of this source again, per session,
+    /// in place. The default is 0.
+    fn parser_version(&self) -> u32 {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +123,7 @@ mod tests {
                     account: Some(Account::default()),
                     first_ts: 1,
                     last_ts: 1,
+                    origin: None,
                 },
                 new_watermark: from_watermark + f.size,
             })

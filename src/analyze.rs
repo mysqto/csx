@@ -323,6 +323,7 @@ mod tests {
                 account: None,
                 first_ts: 1,
                 last_ts: 1,
+                origin: None,
             },
             bodies.len() as i64,
             None,

@@ -246,6 +246,7 @@ fn map_nodes(
             account: None,
             first_ts,
             last_ts,
+            origin: None,
         },
         new_watermark: unique,
     }

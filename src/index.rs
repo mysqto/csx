@@ -8,13 +8,18 @@
 //! repository id from its working directory via the [`GitRunner`] port, and
 //! upserts the source / session / message rows before advancing the watermark.
 //!
+//! A source's [`SessionSource::parser_version`] says what its parser stores.
+//! A file read by an older version is stale. csx reads every file of a stale
+//! session again from the start, in one transaction that first deletes the
+//! session's messages, so readers see either the old rows or the new ones.
+//!
 //! Everything here is decision logic over the [`Db`], [`SessionSource`], and
 //! [`GitRunner`] ports, so it is fully unit-testable with an in-memory database,
 //! temp dirs, and a fake git runner — no shim required.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::db::{source_row_from_account, Db};
+use crate::db::{source_row_from_account, Db, FileRow};
 use crate::error::Result;
 use crate::git_shim::GitRunner;
 use crate::model::{Account, SessionMeta};
@@ -84,19 +89,99 @@ fn sync_source(
         Some("cli"),
     ))?;
 
+    let version = source.parser_version();
+    let mut rows = Vec::with_capacity(files.len());
     for file in &files {
         stats.files_seen += 1;
-        index_file(
-            source,
-            db,
-            git,
-            source_id,
-            &account,
-            file,
-            repo_cache,
-            touched_sessions,
-            stats,
-        )?;
+        rows.push(db.get_file(&file.file_key)?);
+    }
+    let stale = stale_sessions(&rows, version);
+
+    // Sessions with a stale file: every discovered file of the session is
+    // read again, also files that the current parser already read.
+    let mut ctx = FileCtx {
+        source,
+        db,
+        git,
+        source_id,
+        account: &account,
+        version,
+        repo_cache,
+    };
+    for sid in &stale {
+        let group: Vec<&SessionFile> = files
+            .iter()
+            .zip(&rows)
+            .filter(|(_, row)| row.as_ref().and_then(|r| r.session_id.as_ref()) == Some(sid))
+            .map(|(f, _)| f)
+            .collect();
+        reindex_session(&mut ctx, sid, &group, touched_sessions, stats)?;
+    }
+    for (file, row) in files.iter().zip(rows) {
+        let in_stale = row
+            .as_ref()
+            .and_then(|r| r.session_id.as_ref())
+            .is_some_and(|sid| stale.contains(sid));
+        if !in_stale {
+            index_file(&mut ctx, file, row, touched_sessions, stats)?;
+        }
+    }
+    Ok(())
+}
+
+/// What indexing one file of a source needs.
+struct FileCtx<'a> {
+    source: &'a dyn SessionSource,
+    db: &'a Db,
+    git: &'a dyn GitRunner,
+    source_id: i64,
+    account: &'a Account,
+    version: u32,
+    repo_cache: &'a mut HashMap<String, String>,
+}
+
+/// The session ids, in first-seen order, of the tracked files that a parser
+/// older than `version` read. A file with no session id (or an empty one) has
+/// no messages worth reading again, so it never makes a session stale.
+fn stale_sessions(rows: &[Option<FileRow>], version: u32) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for row in rows.iter().flatten() {
+        let Some(sid) = row.session_id.as_ref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if row.parser_version < i64::from(version) && !out.contains(sid) {
+            out.push(sid.clone());
+        }
+    }
+    out
+}
+
+/// Read every file in `group` from the start and replace the messages of
+/// session `sid` with what they hold, in one transaction.
+fn reindex_session(
+    ctx: &mut FileCtx,
+    sid: &str,
+    group: &[&SessionFile],
+    touched_sessions: &mut HashSet<String>,
+    stats: &mut SyncStats,
+) -> Result<()> {
+    let mut deltas = Vec::with_capacity(group.len());
+    for file in group {
+        deltas.push(ctx.source.parse(file, 0)?);
+    }
+    let db = ctx.db;
+    let stored = db.transaction(|| {
+        db.delete_session_messages(sid)?;
+        let mut stored = Vec::with_capacity(group.len());
+        for (file, delta) in group.iter().zip(deltas) {
+            stored.push(store_delta(ctx, file, delta)?);
+        }
+        Ok(stored)
+    })?;
+    for (session_id, added) in stored {
+        stats.files_indexed += 1;
+        stats.messages_added += added;
+        touched_sessions.insert(session_id);
     }
     Ok(())
 }
@@ -115,72 +200,83 @@ fn dedup_by_file_key(files: Vec<SessionFile>) -> Vec<SessionFile> {
 }
 
 /// Fold a single file into the database, honoring the freshness scan and the
-/// persisted watermark.
-#[allow(clippy::too_many_arguments)]
+/// persisted watermark. `existing` is the file's tracked row, if any.
 fn index_file(
-    source: &dyn SessionSource,
-    db: &Db,
-    git: &dyn GitRunner,
-    source_id: i64,
-    account: &Account,
+    ctx: &mut FileCtx,
     file: &SessionFile,
-    repo_cache: &mut HashMap<String, String>,
+    existing: Option<FileRow>,
     touched_sessions: &mut HashSet<String>,
     stats: &mut SyncStats,
 ) -> Result<()> {
-    let existing = db.get_file(&file.file_key)?;
-
     // Freshness scan: an already-tracked file whose size and mtime are both
-    // unchanged cannot have grown, so skip it without touching the disk.
+    // unchanged cannot have grown, so skip it without touching the disk. A
+    // file that an older parser read is not skipped, so its version updates.
     if let Some(row) = &existing {
-        if row.size == file.size as i64 && row.mtime == file.mtime {
+        let current = row.parser_version >= i64::from(ctx.version);
+        if current && row.size == file.size as i64 && row.mtime == file.mtime {
             stats.files_skipped += 1;
             return Ok(());
         }
     }
 
     let watermark = existing.as_ref().map(|r| r.watermark).unwrap_or(0);
-    let delta = source.parse(file, watermark as u64)?;
-
-    // Resolve repo identity from the session's working directory, if any.
-    let mut meta = delta.session;
-    if let Some(cwd) = meta.project_path.clone() {
-        meta.repo_id = Some(resolve_repo_id(git, &cwd, repo_cache));
-    }
-    // Prefer the source-level account when the parsed session lacks one.
-    if meta.account.is_none() && !is_empty_account(account) {
-        meta.account = Some(account.clone());
-    }
-
-    let session_id = meta.session_id.clone();
-    let added = delta.messages.len();
+    let delta = ctx.source.parse(file, watermark as u64)?;
 
     // Fold the whole file into the DB atomically. One transaction collapses
     // this file's hundreds of inserts (messages + both FTS indexes) into a
     // single commit — the dominant cost of a cold index — and keeps each
     // file's messages, session rollup, and advanced watermark consistent.
-    db.transaction(|| {
-        for m in &delta.messages {
-            db.insert_message(source_id, m)?;
-        }
-        let prior = db.session_msg_count(&session_id)?.unwrap_or(0);
-        let summary = session_summary(&meta);
-        db.upsert_session(source_id, &meta, prior + added as i64, summary.as_deref())?;
-        db.upsert_file(
-            source_id,
-            file.path.to_str(),
-            &file.file_key,
-            file.size as i64,
-            file.mtime,
-            Some(&session_id),
-        )?;
-        db.set_watermark(&file.file_key, delta.new_watermark as i64)
-    })?;
+    let db = ctx.db;
+    let (session_id, added) = db.transaction(|| store_delta(ctx, file, delta))?;
 
     stats.files_indexed += 1;
     stats.messages_added += added;
     touched_sessions.insert(session_id);
     Ok(())
+}
+
+/// Store one parsed delta of `file`: its messages, the session rollup, the
+/// file row, its watermark and the parser version. Returns the session id
+/// and the number of messages added. Call it inside a transaction.
+fn store_delta(
+    ctx: &mut FileCtx,
+    file: &SessionFile,
+    delta: crate::source::ParsedDelta,
+) -> Result<(String, usize)> {
+    let db = ctx.db;
+    // Resolve repo identity from the session's working directory, if any.
+    let mut meta = delta.session;
+    if let Some(cwd) = meta.project_path.clone() {
+        meta.repo_id = Some(resolve_repo_id(ctx.git, &cwd, ctx.repo_cache));
+    }
+    // Prefer the source-level account when the parsed session lacks one.
+    if meta.account.is_none() && !is_empty_account(ctx.account) {
+        meta.account = Some(ctx.account.clone());
+    }
+    let session_id = meta.session_id.clone();
+    let added = delta.messages.len();
+    for m in &delta.messages {
+        db.insert_message(ctx.source_id, m)?;
+    }
+    let prior = db.session_msg_count(&session_id)?.unwrap_or(0);
+    let summary = session_summary(&meta);
+    db.upsert_session(
+        ctx.source_id,
+        &meta,
+        prior + added as i64,
+        summary.as_deref(),
+    )?;
+    db.upsert_file(
+        ctx.source_id,
+        file.path.to_str(),
+        &file.file_key,
+        file.size as i64,
+        file.mtime,
+        Some(&session_id),
+    )?;
+    db.set_watermark(&file.file_key, delta.new_watermark as i64)?;
+    db.set_parser_version(&file.file_key, ctx.version)?;
+    Ok((session_id, added))
 }
 
 /// A summary string for the session row: currently the project name, when
@@ -233,6 +329,10 @@ mod tests {
         account: Option<Account>,
         /// Account stamped directly onto every parsed session, if any.
         session_account: Option<Account>,
+        /// What `parser_version` returns.
+        version: u32,
+        /// Origin stamped onto every parsed session.
+        origin: Option<crate::model::Origin>,
     }
 
     #[derive(Clone)]
@@ -254,6 +354,8 @@ mod tests {
                 deltas: HashMap::new(),
                 account: None,
                 session_account: None,
+                version: 0,
+                origin: None,
             }
         }
 
@@ -350,6 +452,7 @@ mod tests {
                     account: self.session_account.clone(),
                     first_ts: 1_000,
                     last_ts: 1_000 + d.texts.len().max(1) as i64,
+                    origin: self.origin,
                 },
                 new_watermark: d.to,
             })
@@ -362,6 +465,117 @@ mod tests {
         fn config_dir(&self) -> Option<String> {
             Some("/cfg".into())
         }
+
+        fn parser_version(&self) -> u32 {
+            self.version
+        }
+    }
+
+    /// Files of two sessions plus one file with no session id, read by a
+    /// parser of `version`.
+    fn versioned_source(version: u32, with_new_file: bool) -> FakeSource {
+        let mut src = FakeSource::new(Tool::ClaudeCode);
+        src.version = version;
+        src.origin = (version > 0).then_some(crate::model::Origin::User);
+        src.add_file("main", "/p/s1.jsonl", 100, 10);
+        src.add_delta("main", 0, 100, "s1", Some("/w"), &["a", "b"]);
+        src.add_file("sub", "/p/s1/subagents/x.jsonl", 50, 10);
+        src.add_delta("sub", 0, 50, "s1", Some("/w"), &["c"]);
+        src.add_file("other", "/p/s2.jsonl", 10, 10);
+        src.add_delta("other", 0, 10, "s2", Some("/w"), &["d"]);
+        src.add_file("empty", "/p/e.jsonl", 1, 10);
+        if with_new_file {
+            src.add_file("new", "/p/s1/subagents/y.jsonl", 5, 10);
+            src.add_delta("new", 0, 5, "s1", Some("/w"), &["e"]);
+        }
+        src
+    }
+
+    fn count(db: &Db, sql: &str) -> i64 {
+        db.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_newer_parser_reads_stale_sessions_again_in_place() {
+        let db = Db::open(":memory:").unwrap();
+        let git = FakeGitRunner::default();
+        sync(&[boxed(versioned_source(0, false))], &db, &git).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='s1'"),
+            3
+        );
+        // The same parser again: everything is fresh.
+        let stats = sync(&[boxed(versioned_source(0, false))], &db, &git).unwrap();
+        assert_eq!((stats.files_skipped, stats.files_indexed), (4, 0));
+
+        // Version 1: s1 and s2 are read again from the start, not doubled. A
+        // new file of s1 joins after the re-read.
+        let stats = sync(&[boxed(versioned_source(1, true))], &db, &git).unwrap();
+        assert_eq!(stats.files_seen, 5);
+        assert_eq!(stats.files_skipped, 0);
+        assert_eq!(stats.files_indexed, 5);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='s1'"),
+            4
+        );
+        assert_eq!(
+            count(&db, "SELECT msg_count FROM sessions WHERE session_id='s1'"),
+            4
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='s2'"),
+            1
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM sessions WHERE origin = 'user' AND session_id <> ''"
+            ),
+            2
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE parser_version = 1"),
+            5
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'a'"
+            ),
+            1
+        );
+
+        // Version 1 again: nothing to do.
+        let stats = sync(&[boxed(versioned_source(1, true))], &db, &git).unwrap();
+        assert_eq!((stats.files_skipped, stats.files_indexed), (5, 0));
+    }
+
+    #[test]
+    fn stale_sessions_skip_files_without_a_session() {
+        let row = |sid: Option<&str>, v: i64| {
+            Some(FileRow {
+                id: 1,
+                source_id: 1,
+                path: None,
+                file_key: "k".into(),
+                size: 0,
+                mtime: 0,
+                watermark: 0,
+                session_id: sid.map(str::to_string),
+                parser_version: v,
+            })
+        };
+        let rows = vec![
+            row(Some("a"), 0),
+            None,
+            row(None, 0),
+            row(Some(""), 0),
+            row(Some("b"), 1),
+            row(Some("a"), 0),
+            row(Some("c"), 0),
+        ];
+        assert_eq!(stale_sessions(&rows, 1), vec!["a", "c"]);
+        assert!(stale_sessions(&rows, 0).is_empty());
     }
 
     // Alias so the fake's return type reads naturally above.
@@ -666,6 +880,7 @@ mod tests {
             account: None,
             first_ts: 0,
             last_ts: 0,
+            origin: None,
         };
         assert_eq!(session_summary(&meta).as_deref(), Some("proj"));
     }

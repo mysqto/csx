@@ -140,6 +140,7 @@ mod tests {
             account: None,
             first_ts: 1,
             last_ts: 2,
+            origin: None,
         };
         db.upsert_session(src, &meta, 0, None).unwrap();
         db
