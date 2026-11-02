@@ -377,6 +377,10 @@ A hotkey such as `alt+a` takes the key from other apps. Option+A no longer
 types its special character in any app. Choose another hotkey if you need
 that character.
 
+Each AI session row shows when the session was last active, for example
+`○ idle · 5m ago · claude-code · ghostty · ~/work/app`. Closed sessions read
+`closed · 2d ago · codex · ~/work/app`.
+
 In the result list, press Return to focus the tab. Press Cmd+Return to copy
 the session id (or the working directory). Press Option+Return to copy a
 resume command, when the agent supports one.

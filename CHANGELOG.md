@@ -39,6 +39,10 @@ All notable changes to csx are documented here. The format follows
   terminal and saves it. In Alfred, Ctrl+Return picks a terminal for one
   session. In Raycast, use Resume in Another Terminal. The Alfred workflow
   gets a "Terminal" setting.
+- **Alfred shows the last active time.** Open AI session rows and closed
+  sessions show how long ago the session was last active, for example
+  `5m ago` or `2d ago`. Raycast shows it as a date on the right, with the full
+  time in the tooltip.
 
 ## [0.2.0] - 2026-10-27
 

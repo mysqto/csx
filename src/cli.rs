@@ -423,24 +423,27 @@ pub fn tabs_context(
     }
 }
 
-/// Handle `csx tabs`: list through the runner and render in `output`.
-/// `home` shortens working directories in the Alfred output.
+/// Handle `csx tabs`: list through the runner and render in `output`. In
+/// the Alfred output, the runner's home shortens working directories and
+/// `now_ms` (unix milliseconds) dates the last activity.
 pub fn handle_tabs(
     db: &Db,
     tabs: &dyn TabsRunner,
     opts: &ListOptions,
     kitty_socket: Option<String>,
     output: TabsOutput,
-    home: Option<&std::path::Path>,
+    now_ms: i64,
     out: &mut dyn Write,
 ) -> Result<()> {
     let report = tabs.list(db, opts, kitty_socket)?;
     let text = match output {
         TabsOutput::Human => render_human(&report),
         TabsOutput::Json => render_json(&report),
-        TabsOutput::Alfred => {
-            render_alfred_with_home(&report, home.and_then(std::path::Path::to_str))
-        }
+        TabsOutput::Alfred => render_alfred_with_home(
+            &report,
+            tabs.home().as_deref().and_then(std::path::Path::to_str),
+            now_ms,
+        ),
     };
     writeln!(out, "{}", text.trim_end_matches('\n'))?;
     Ok(())
@@ -706,8 +709,8 @@ pub fn dispatch(
                     .collect(),
                 closed: closed.then_some(closed_limit),
             };
-            let home = tabs.home();
-            handle_tabs(db, tabs, &opts, kitty_socket, output, home.as_deref(), out)
+            let now = crate::tabs::render::now_ms();
+            handle_tabs(db, tabs, &opts, kitty_socket, output, now, out)
         }
         Some(Command::Alfred {
             action:
@@ -1624,7 +1627,7 @@ mod tests {
             &opts,
             None,
             TabsOutput::Human,
-            None,
+            0,
             &mut FailWriter,
         )
         .unwrap_err();

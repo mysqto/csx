@@ -54,9 +54,15 @@ function statusAccessory(r: Row): List.Item.Accessory[] {
   }
 }
 
+/** A relative date on the right, with the full local time on hover. */
+function lastActive(ms: number): List.Item.Accessory {
+  const date = new Date(ms);
+  return { date, tooltip: `Last active: ${date.toLocaleString()}` };
+}
+
 function accessories(r: Row): List.Item.Accessory[] {
   const out = statusAccessory(r);
-  if (r.agent?.updated_at) out.push({ date: new Date(r.agent.updated_at), tooltip: "Last activity" });
+  if (r.agent?.updated_at) out.push(lastActive(r.agent.updated_at));
   if (r.terminal) out.push({ text: terminalName(r.terminal) });
   return out;
 }
@@ -267,7 +273,7 @@ export function TabsList({ agentsOnly }: { agentsOnly: boolean }) {
               title={closedTitle(c)}
               subtitle={closedSubtitle(c)}
               keywords={closedKeywords(c)}
-              accessories={c.updated_at ? [{ date: new Date(c.updated_at), tooltip: "Last activity" }] : []}
+              accessories={c.updated_at ? [lastActive(c.updated_at)] : []}
               actions={<ClosedActions session={c} saved={saved} savedId={savedId} onSaved={saveId} />}
             />
           ))}

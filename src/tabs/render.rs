@@ -233,6 +233,24 @@ impl Mod {
     }
 }
 
+/// How long ago `ts_ms` was, as of `now_ms` (both unix milliseconds):
+/// `just now`, `5m ago`, `3h ago`, `2d ago`, `4mo ago` or `1y ago`. A time
+/// in the future (clock skew) reads `just now`.
+fn ago(ts_ms: i64, now_ms: i64) -> String {
+    const MIN: i64 = 60;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    let secs = now_ms.saturating_sub(ts_ms).max(0) / 1000;
+    match secs {
+        s if s < MIN => "just now".into(),
+        s if s < HOUR => format!("{}m ago", s / MIN),
+        s if s < DAY => format!("{}h ago", s / HOUR),
+        s if s < 30 * DAY => format!("{}d ago", s / DAY),
+        s if s < 365 * DAY => format!("{}mo ago", s / (30 * DAY)),
+        s => format!("{}y ago", s / (365 * DAY)),
+    }
+}
+
 /// `path` with `home` (when given and non-empty) shortened to `~`.
 fn shorten_home(path: &str, home: Option<&str>) -> String {
     let Some(home) = home.filter(|h| !h.is_empty()) else {
@@ -245,7 +263,7 @@ fn shorten_home(path: &str, home: Option<&str>) -> String {
     }
 }
 
-fn subtitle(r: &Row, home: Option<&str>) -> String {
+fn subtitle(r: &Row, home: Option<&str>, now_ms: i64) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(a) = &r.agent {
         match a.status {
@@ -253,6 +271,7 @@ fn subtitle(r: &Row, home: Option<&str>) -> String {
             AgentStatus::Idle => parts.push("○ idle".into()),
             AgentStatus::Unknown => {}
         }
+        parts.extend(a.updated_at.map(|t| ago(t, now_ms)));
         parts.push(a.tool.clone());
     }
     parts.push(r.terminal.clone());
@@ -264,7 +283,7 @@ fn subtitle(r: &Row, home: Option<&str>) -> String {
     parts.join(" · ")
 }
 
-fn alfred_item(r: &Row, home: Option<&str>) -> AlfredItem {
+fn alfred_item(r: &Row, home: Option<&str>, now_ms: i64) -> AlfredItem {
     let session = r.agent.as_ref().and_then(|a| a.session_id.as_deref());
     let cmd = match session {
         Some(id) => Mod::copy("session id", Some(id)),
@@ -277,7 +296,7 @@ fn alfred_item(r: &Row, home: Option<&str>) -> AlfredItem {
         .map(|c| Mod::copy("resume command", Some(c)));
     AlfredItem {
         title: title(r).to_string(),
-        subtitle: subtitle(r, home),
+        subtitle: subtitle(r, home, now_ms),
         arg: r.ref_.clone(),
         valid: r.ref_.is_some(),
         variables: Some(Vars::tab()),
@@ -299,18 +318,17 @@ fn prompt_part(prompt: Option<&str>) -> Option<String> {
 
 /// A closed session: Return opens it in the saved terminal, Ctrl+Return
 /// picks a terminal for this session, Cmd and Option copy.
-fn closed_item(c: &ClosedSession, home: Option<&str>) -> AlfredItem {
+fn closed_item(c: &ClosedSession, home: Option<&str>, now_ms: i64) -> AlfredItem {
     let title = c.title.as_deref().map(one_line).unwrap_or_default();
     let title = if title.is_empty() {
         c.session_id.clone()
     } else {
         title
     };
-    let mut parts = vec![
-        "closed".to_string(),
-        c.tool.clone(),
-        shorten_home(&c.cwd, home),
-    ];
+    let mut parts = vec!["closed".to_string()];
+    parts.extend(c.updated_at.map(|t| ago(t, now_ms)));
+    parts.push(c.tool.clone());
+    parts.push(shorten_home(&c.cwd, home));
     parts.extend(prompt_part(c.last_prompt.as_deref()));
     let resume = Some(c.resume_command.as_str()).filter(|r| !r.is_empty());
     AlfredItem {
@@ -332,28 +350,38 @@ fn closed_item(c: &ClosedSession, home: Option<&str>) -> AlfredItem {
     }
 }
 
-/// Alfred script filter JSON, with the cwd shortened against `HOME`.
+/// Alfred script filter JSON, with the cwd shortened against `HOME` and
+/// last activity shown relative to the system clock.
 pub fn render_alfred(report: &TabsReport) -> String {
-    render_alfred_with_home(report, std::env::var("HOME").ok().as_deref())
+    render_alfred_with_home(report, std::env::var("HOME").ok().as_deref(), now_ms())
 }
 
-/// Alfred script filter JSON, with the cwd shortened against `home`.
+/// The system clock in unix milliseconds, or 0 before 1970.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Alfred script filter JSON, with the cwd shortened against `home` and
+/// last activity shown relative to `now_ms` (unix milliseconds).
 ///
 /// Warnings come first as rows that cannot be actioned, then the open rows,
 /// then the closed sessions when they were listed. With neither rows nor
 /// closed sessions, one "No matching tabs" row follows the warnings.
-pub fn render_alfred_with_home(report: &TabsReport, home: Option<&str>) -> String {
+pub fn render_alfred_with_home(report: &TabsReport, home: Option<&str>, now_ms: i64) -> String {
     let mut items: Vec<AlfredItem> = report
         .warnings
         .iter()
         .map(|w| AlfredItem::message(w))
         .collect();
-    items.extend(report.rows.iter().map(|r| alfred_item(r, home)));
+    items.extend(report.rows.iter().map(|r| alfred_item(r, home, now_ms)));
     let closed = report.closed.as_deref().unwrap_or_default();
     if report.rows.is_empty() && closed.is_empty() {
         items.push(AlfredItem::message("No matching tabs"));
     }
-    items.extend(closed.iter().map(|c| closed_item(c, home)));
+    items.extend(closed.iter().map(|c| closed_item(c, home, now_ms)));
     serde_json::to_string(&AlfredOutput { items }).unwrap_or_default()
 }
 
@@ -362,6 +390,9 @@ mod tests {
     use super::*;
     use crate::tabs::{AgentInfo, AgentStatus, ClosedSession, Row, Tab};
     use serde_json::Value;
+
+    /// The clock the Alfred tests render against.
+    const NOW: i64 = 1_800_000_000_000;
 
     fn row(terminal: &str, ref_: Option<&str>, title: &str, cwd: Option<&str>) -> Row {
         Tab {
@@ -545,7 +576,7 @@ mod tests {
         c.last_prompt = Some("say \"x\"\\n\n🙂".into());
         let mut r = report(vec![], &[]);
         r.closed = Some(vec![c]);
-        let raw = render_alfred_with_home(&r, Some("/Users/me"));
+        let raw = render_alfred_with_home(&r, Some("/Users/me"), NOW);
         let items = alfred(&r);
         assert_eq!(items[0]["title"], hostile);
         assert_eq!(items[0]["arg"], "s\"1\\");
@@ -557,8 +588,57 @@ mod tests {
         assert!(!raw.contains('\n'));
     }
 
+    #[test]
+    fn ago_reads_each_unit() {
+        let s = 1000;
+        let cases = [
+            (-5 * s, "just now"),
+            (0, "just now"),
+            (59 * s, "just now"),
+            (60 * s, "1m ago"),
+            (59 * 60 * s, "59m ago"),
+            (3600 * s, "1h ago"),
+            (23 * 3600 * s, "23h ago"),
+            (86_400 * s, "1d ago"),
+            (29 * 86_400 * s, "29d ago"),
+            (30 * 86_400 * s, "1mo ago"),
+            (364 * 86_400 * s, "12mo ago"),
+            (365 * 86_400 * s, "1y ago"),
+            (800 * 86_400 * s, "2y ago"),
+        ];
+        for (age, want) in cases {
+            assert_eq!(ago(NOW - age, NOW), want, "age {age} ms");
+        }
+        assert_eq!(
+            ago(i64::MIN, i64::MAX),
+            format!("{}y ago", i64::MAX / 1000 / (365 * 86_400))
+        );
+    }
+
+    #[test]
+    fn render_alfred_shows_last_activity() {
+        let mut open = row("ghostty", Some("ghostty:1"), "zsh", Some("/Users/me/w"));
+        open.agent = Some(AgentInfo {
+            tool: "claude-code".into(),
+            status: AgentStatus::Idle,
+            updated_at: Some(NOW - 5 * 60_000),
+            ..AgentInfo::default()
+        });
+        let mut r = report(vec![open], &[]);
+        r.closed = Some(vec![ClosedSession {
+            updated_at: Some(NOW - 2 * 86_400_000),
+            ..closed("codex", "u1", Some("t"), "/Users/me/x")
+        }]);
+        let items = alfred(&r);
+        assert_eq!(
+            items[0]["subtitle"],
+            "○ idle · 5m ago · claude-code · ghostty · ~/w"
+        );
+        assert_eq!(items[1]["subtitle"], "closed · 2d ago · codex · ~/x");
+    }
+
     fn alfred(r: &TabsReport) -> Vec<Value> {
-        let v: Value = serde_json::from_str(&render_alfred_with_home(r, Some("/Users/me")))
+        let v: Value = serde_json::from_str(&render_alfred_with_home(r, Some("/Users/me"), NOW))
             .expect("valid json");
         v["items"].as_array().unwrap().clone()
     }
@@ -660,9 +740,12 @@ mod tests {
             tool: "codex".into(),
             ..AgentInfo::default()
         });
-        let v: Value =
-            serde_json::from_str(&render_alfred_with_home(&report(vec![unknown], &[]), None))
-                .unwrap();
+        let v: Value = serde_json::from_str(&render_alfred_with_home(
+            &report(vec![unknown], &[]),
+            None,
+            NOW,
+        ))
+        .unwrap();
         let u = &v["items"][0];
         assert_eq!(u["subtitle"], "codex");
         assert_eq!(u["title"], "codex");
@@ -671,6 +754,7 @@ mod tests {
         let v: Value = serde_json::from_str(&render_alfred_with_home(
             &report(vec![home_none], &[]),
             None,
+            NOW,
         ))
         .unwrap();
         assert_eq!(v["items"][0]["subtitle"], "iterm2 · /Users/me");
