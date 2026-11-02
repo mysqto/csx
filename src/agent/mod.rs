@@ -130,17 +130,30 @@ pub trait Agent {
     }
 }
 
-/// True when one of `flags` is a word of `args` before a `--`, after which
-/// the words are a prompt.
-pub(crate) fn has_flag(args: &[&str], flags: &[&str]) -> bool {
-    args.iter()
-        .take_while(|a| **a != "--")
-        .any(|a| flags.contains(a))
+/// True when one of `markers` is a flag before the first word that is not a
+/// flag, or is that first word (a subcommand such as `exec` or `run`). A `--`
+/// ends the check. `ps` joins the command line with spaces, so a quoted
+/// prompt such as `"why does grep -p fail"` arrives as separate words; only
+/// its first word is checked. A flag after a flag value (`--model opus -p`)
+/// is missed, which only leaves the agent shown.
+pub(crate) fn has_marker(args: &[&str], markers: &[&str]) -> bool {
+    for a in args {
+        if *a == "--" {
+            return false;
+        }
+        if markers.contains(a) {
+            return true;
+        }
+        if !a.starts_with('-') {
+            return false;
+        }
+    }
+    false
 }
 
-/// [`Origin::Automated`] when `p` has one of `flags`, else `None`.
-pub(crate) fn automated_if_flag(p: &Process, flags: &[&str]) -> Option<Origin> {
-    has_flag(&p.arguments(), flags).then_some(Origin::Automated)
+/// [`Origin::Automated`] when `p` has one of `markers` (see [`has_marker`]).
+pub(crate) fn automated_if_marker(p: &Process, markers: &[&str]) -> Option<Origin> {
+    has_marker(&p.arguments(), markers).then_some(Origin::Automated)
 }
 
 /// The info every tool provides: tool id, pid and tty.
@@ -166,10 +179,9 @@ pub fn registry() -> Vec<Box<dyn Agent>> {
     v
 }
 
-/// Lower is better: shown before hidden, then foreground, then the lowest
-/// pid. So a hidden job never takes the place of the person's session.
-fn rank(p: &Process, origin: Option<Origin>) -> (bool, bool, u32) {
-    (Origin::hidden_by_default(origin), !p.is_foreground(), p.pid)
+/// Lower is better: foreground first, then the lowest pid.
+fn rank(p: &Process) -> (bool, u32) {
+    (!p.is_foreground(), p.pid)
 }
 
 /// Who started agent process `p` of tool `agent`. Ancestry first, for every
@@ -199,9 +211,11 @@ fn origin_of(
 /// One [`AgentInfo`] per matching process that has a tty (a daemon such as
 /// `codex app-server` has none and is not a session), with its origin: from
 /// the process (ancestry, then [`Agent::origin`]), else from
-/// [`Agent::enrich`]. When
-/// several processes of the same tool share a tty, keep a shown one over a
-/// hidden one, then the foreground one, then the lowest pid.
+/// [`Agent::enrich`]. Per tool and tty, csx keeps one shown agent and one
+/// hidden one (see [`Origin::hidden_by_default`]): the foreground one, else
+/// the lowest pid. So a hidden job never takes the place of the person's
+/// session, and its session still counts as running. Shown agents come
+/// first, so they get the tab when agents are attached to tabs.
 pub fn detect(
     table: &ProcessTable,
     agents: &[Box<dyn Agent>],
@@ -216,17 +230,17 @@ pub fn detect(
             continue;
         }
         let origin = origin_of(table, agents, agent.as_ref(), p);
-        let same = picked
-            .iter()
-            .position(|(a, q, _)| a.tool() == agent.tool() && q.tty == p.tty);
+        let hidden = Origin::hidden_by_default(origin);
+        let same = picked.iter().position(|(a, q, o)| {
+            a.tool() == agent.tool() && q.tty == p.tty && Origin::hidden_by_default(*o) == hidden
+        });
         match same {
-            Some(i) if rank(p, origin) < rank(picked[i].1, picked[i].2) => {
-                picked[i] = (agent.as_ref(), p, origin)
-            }
+            Some(i) if rank(p) < rank(picked[i].1) => picked[i] = (agent.as_ref(), p, origin),
             Some(_) => {}
             None => picked.push((agent.as_ref(), p, origin)),
         }
     }
+    picked.sort_by_key(|(_, _, o)| Origin::hidden_by_default(*o));
     picked
         .into_iter()
         .map(|(a, p, origin)| {
@@ -298,6 +312,7 @@ mod tests {
             vec![
                 ("claude-code".into(), 10, None),
                 ("codex".into(), 20, None),
+                ("claude-code".into(), 13, Some(Origin::Subagent)),
                 ("gemini".into(), 21, Some(Origin::Subagent)),
             ]
         );
@@ -306,8 +321,9 @@ mod tests {
     #[test]
     fn detect_keeps_a_lone_hidden_agent_and_prefers_shown_ones() {
         // On ttys3 a print-mode claude that the person's claude started has
-        // the lower pid, but the person's session wins. On ttys5 a hidden job
-        // alone on its tty stays, marked subagent.
+        // the lower pid. Both stay: the person's session first, so it gets
+        // the tab, and the job after it, so its session still counts as
+        // running. On ttys5 a hidden job alone on its tty stays too.
         let table = ProcessTable {
             procs: vec![
                 child(5, 50, "ttys3", "claude -p review"),
@@ -321,6 +337,7 @@ mod tests {
             vec![
                 ("claude-code".into(), 50, None),
                 ("claude-code".into(), 60, None),
+                ("claude-code".into(), 5, Some(Origin::Subagent)),
                 ("claude-code".into(), 61, Some(Origin::Subagent)),
             ]
         );
@@ -352,10 +369,15 @@ mod tests {
     }
 
     #[test]
-    fn has_flag_stops_at_the_prompt_separator() {
-        assert!(has_flag(&["-p", "x"], &["-p"]));
-        assert!(!has_flag(&["--", "-p"], &["-p"]));
-        assert!(!has_flag(&["x"], &[]));
+    fn has_marker_checks_flags_then_the_first_word_only() {
+        assert!(has_marker(&["-p", "x"], &["-p"]));
+        assert!(has_marker(&["--verbose", "-p", "x"], &["-p"]));
+        assert!(!has_marker(&["--", "-p"], &["-p"]));
+        assert!(!has_marker(&["why", "does", "grep", "-p", "fail"], &["-p"]));
+        assert!(has_marker(&["--full-auto", "exec", "x"], &["exec"]));
+        assert!(!has_marker(&["resume", "exec"], &["exec"]));
+        assert!(!has_marker(&["-v"], &["-p"]));
+        assert!(!has_marker(&["x"], &[]));
     }
 
     #[test]
@@ -369,6 +391,7 @@ mod tests {
         assert_eq!(o("claude-code", "claude --print"), Some(Origin::Automated));
         assert_eq!(o("claude-code", "claude --resume x"), None);
         assert_eq!(o("claude-code", "claude -- -p"), None);
+        assert_eq!(o("claude-code", "claude why does grep -p fail"), None);
         assert_eq!(o("devin", "devin -p -- hi"), Some(Origin::Automated));
         assert_eq!(o("devin", "devin"), None);
         assert_eq!(o("codex", "codex exec fix"), Some(Origin::Automated));

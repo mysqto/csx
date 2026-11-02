@@ -1,6 +1,6 @@
 //! Generic agent detection for other AI tools.
 
-use super::{automated_if_flag, base_info, Agent, AgentContext};
+use super::{automated_if_marker, base_info, Agent, AgentContext};
 use crate::model::Origin;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -52,7 +52,7 @@ impl Agent for NamedTool {
     }
 
     fn origin(&self, p: &Process) -> Option<Origin> {
-        automated_if_flag(p, self.print_markers)
+        automated_if_marker(p, self.print_markers)
     }
 }
 

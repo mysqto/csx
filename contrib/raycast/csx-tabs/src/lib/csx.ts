@@ -52,24 +52,24 @@ function run(args: string[], timeout: number): Promise<string> {
   });
 }
 
-/** True when `e` says that csx is older than 0.3.0. */
-function isBefore030(e: unknown): boolean {
-  return e instanceof RunError && (isClosedUnsupported(e.stderr) || isAutomatedUnsupported(e.stderr));
+function rejected(e: unknown, test: (stderr: string) => boolean): boolean {
+  return e instanceof RunError && test(e.stderr);
 }
 
 /** List tabs; only those that run an agent, plus closed sessions, when
  * `agentsOnly`. `automated` also lists agents and sessions that a program or
- * another agent started. */
+ * another agent started. An older csx gets only the flags it knows. */
 export async function listTabs(agentsOnly: boolean, automated = false): Promise<Report> {
-  const extra = automated ? ["--automated"] : [];
-  const args = agentsOnly ? ["--agents", "--closed", "--closed-limit", "200", ...extra] : extra;
+  const base = agentsOnly ? ["tabs", "--json", "--agents"] : ["tabs", "--json"];
+  const closed = agentsOnly ? ["--closed", "--closed-limit", "200"] : [];
+  const list = async (args: string[]) => parseReport(await run(args, 60_000));
   try {
-    return parseReport(await run(["tabs", "--json", ...args], 60_000));
+    return await list([...base, ...closed, ...(automated ? ["--automated"] : [])]);
   } catch (e) {
-    if (!isBefore030(e)) throw e;
+    if (automated && rejected(e, isAutomatedUnsupported)) return listTabs(agentsOnly, false);
+    if (!agentsOnly || !rejected(e, isClosedUnsupported)) throw e;
     // csx before 0.3.0 lists open tabs only, and every agent.
-    const report = parseReport(await run(agentsOnly ? ["tabs", "--json", "--agents"] : ["tabs", "--json"], 60_000));
-    if (!agentsOnly) return report;
+    const report = await list(base);
     return { ...report, warnings: [...report.warnings, CLOSED_UNSUPPORTED_WARNING] };
   }
 }

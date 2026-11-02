@@ -147,7 +147,7 @@ does not touch `Tool` in `model.rs`.
 4. Origin: csx hides agents that a program or another agent started. The
    process ancestry rule in `agent::detect` covers every tool with no work.
    If the tool has a print or headless mode, add its flags: override
-   `Agent::origin` (see `automated_if_flag`), or fill `print_markers` for a
+   `Agent::origin` (see `automated_if_marker`), or fill `print_markers` for a
    generic tool. Add only flags that you checked in the tool's own help. If
    the tool's session data records who started it, set `AgentInfo::origin`
    in `enrich`; the process result wins when both exist.

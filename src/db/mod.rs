@@ -359,8 +359,14 @@ impl Db {
         self.conn.execute_batch(SCHEMA)?;
         for (table, column, decl) in ADDED_COLUMNS {
             if !self.has_column(table, column)? {
-                self.conn
-                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+                let added = self
+                    .conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"));
+                // Another process can add the column between the check and the
+                // ALTER; that is fine.
+                if added.is_err() && !self.has_column(table, column)? {
+                    added?;
+                }
             }
         }
         Ok(())
@@ -401,6 +407,10 @@ impl Db {
 
     /// Insert or replace a session's aggregate metadata.
     ///
+    /// The origin never hides a session that the person drove: once any parse
+    /// says `user`, it stays `user`. Otherwise the first known origin stays,
+    /// and `None` keeps what is stored.
+    ///
     /// `account` fields are folded into the session's owning source columns
     /// only via [`upsert_source`]; here we persist the session row itself.
     pub fn upsert_session(
@@ -426,7 +436,10 @@ impl Db {
                 last_ts      = MAX(sessions.last_ts, excluded.last_ts),
                 msg_count    = excluded.msg_count,
                 summary      = excluded.summary,
-                origin       = COALESCE(excluded.origin, sessions.origin)",
+                origin       = CASE
+                    WHEN 'user' IN (sessions.origin, excluded.origin) THEN 'user'
+                    ELSE COALESCE(sessions.origin, excluded.origin)
+                END",
             params![
                 meta.session_id,
                 source_id,
@@ -634,8 +647,9 @@ impl Db {
             "DELETE FROM messages WHERE session_id = ?1",
             params![session_id],
         )?;
+        // The new read decides the origin again.
         self.conn.execute(
-            "UPDATE sessions SET msg_count = 0 WHERE session_id = ?1",
+            "UPDATE sessions SET msg_count = 0, origin = NULL WHERE session_id = ?1",
             params![session_id],
         )?;
         Ok(())
@@ -1577,10 +1591,26 @@ mod tests {
         m.origin = Some(Origin::Automated);
         db.upsert_session(src, &m, 0, None).unwrap();
         assert_eq!(origin(&db).as_deref(), Some("automated"));
-        // A later parse that cannot tell keeps the stored origin.
+        // A later parse that cannot tell keeps the stored origin, and so
+        // does a parse with another non-user origin.
         m.origin = None;
         db.upsert_session(src, &m, 0, None).unwrap();
         assert_eq!(origin(&db).as_deref(), Some("automated"));
+        m.origin = Some(Origin::Subagent);
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db).as_deref(), Some("automated"));
+        // `user` wins once seen, and then stays.
+        m.origin = Some(Origin::User);
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db).as_deref(), Some("user"));
+        m.origin = Some(Origin::Automated);
+        db.upsert_session(src, &m, 0, None).unwrap();
+        assert_eq!(origin(&db).as_deref(), Some("user"));
+        // A re-read starts the origin over.
+        db.delete_session_messages("s1").unwrap();
+        assert_eq!(origin(&db), None);
+        m.origin = Some(Origin::Automated);
+        db.upsert_session(src, &m, 0, None).unwrap();
         let r = db.resumable_session("claude-code", "s1").unwrap().unwrap();
         assert_eq!(r.origin, Some(Origin::Automated));
         // An unknown stored value reads as no origin.

@@ -97,8 +97,6 @@ fn sync_source(
     }
     let stale = stale_sessions(&rows, version);
 
-    // Sessions with a stale file: every discovered file of the session is
-    // read again, also files that the current parser already read.
     let mut ctx = FileCtx {
         source,
         db,
@@ -108,22 +106,24 @@ fn sync_source(
         version,
         repo_cache,
     };
+    // Sessions with a stale file are read again first, each with every
+    // session it turns out to share files with. `reread` marks the files
+    // that were read that way.
+    let mut done: HashSet<String> = HashSet::new();
+    let mut reread: HashSet<usize> = HashSet::new();
     for sid in &stale {
-        let group: Vec<&SessionFile> = files
-            .iter()
-            .zip(&rows)
-            .filter(|(_, row)| row.as_ref().and_then(|r| r.session_id.as_ref()) == Some(sid))
-            .map(|(f, _)| f)
-            .collect();
-        reindex_session(&mut ctx, sid, &group, touched_sessions, stats)?;
+        if !done.contains(sid) {
+            let family = Family {
+                files: &files,
+                rows: &rows,
+            };
+            let ids = reindex_family(&mut ctx, &family, sid, &mut reread, touched_sessions, stats)?;
+            done.extend(ids);
+        }
     }
-    for (file, row) in files.iter().zip(rows) {
-        let in_stale = row
-            .as_ref()
-            .and_then(|r| r.session_id.as_ref())
-            .is_some_and(|sid| stale.contains(sid));
-        if !in_stale {
-            index_file(&mut ctx, file, row, touched_sessions, stats)?;
+    for (i, file) in files.iter().enumerate() {
+        if !reread.contains(&i) {
+            index_file(&mut ctx, file, touched_sessions, stats)?;
         }
     }
     Ok(())
@@ -140,41 +140,77 @@ struct FileCtx<'a> {
     repo_cache: &'a mut HashMap<String, String>,
 }
 
+/// The discovered files of a source and their tracked rows, side by side.
+struct Family<'a> {
+    files: &'a [SessionFile],
+    rows: &'a [Option<FileRow>],
+}
+
+/// The non-empty session id stored for a tracked file.
+fn stored_session(row: &Option<FileRow>) -> Option<&str> {
+    row.as_ref()
+        .and_then(|r| r.session_id.as_deref())
+        .filter(|s| !s.is_empty())
+}
+
 /// The session ids, in first-seen order, of the tracked files that a parser
 /// older than `version` read. A file with no session id (or an empty one) has
 /// no messages worth reading again, so it never makes a session stale.
 fn stale_sessions(rows: &[Option<FileRow>], version: u32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for row in rows.iter().flatten() {
-        let Some(sid) = row.session_id.as_ref().filter(|s| !s.is_empty()) else {
+    for row in rows {
+        let Some(sid) = stored_session(row) else {
             continue;
         };
-        if row.parser_version < i64::from(version) && !out.contains(sid) {
-            out.push(sid.clone());
+        let old = row
+            .as_ref()
+            .is_some_and(|r| r.parser_version < i64::from(version));
+        if old && !out.iter().any(|o| o == sid) {
+            out.push(sid.to_string());
         }
     }
     out
 }
 
-/// Read every file in `group` from the start and replace the messages of
-/// session `sid` with what they hold, in one transaction.
-fn reindex_session(
+/// Read session `sid` again from the start, in one transaction: every file
+/// stored under it, and every file stored under a session id that those
+/// files turn out to hold. A transcript can switch session ids, so a file's
+/// stored id is not always the id a full read gives. The messages of all
+/// those sessions are deleted and stored again. Returns the session ids.
+fn reindex_family(
     ctx: &mut FileCtx,
+    family: &Family,
     sid: &str,
-    group: &[&SessionFile],
+    reread: &mut HashSet<usize>,
     touched_sessions: &mut HashSet<String>,
     stats: &mut SyncStats,
-) -> Result<()> {
-    let mut deltas = Vec::with_capacity(group.len());
-    for file in group {
-        deltas.push(ctx.source.parse(file, 0)?);
+) -> Result<Vec<String>> {
+    let mut ids = vec![sid.to_string()];
+    let mut parsed: Vec<(usize, Prepared)> = Vec::new();
+    let mut k = 0;
+    while k < ids.len() {
+        for (i, row) in family.rows.iter().enumerate() {
+            if reread.contains(&i) || stored_session(row) != Some(ids[k].as_str()) {
+                continue;
+            }
+            let delta = ctx.source.parse(&family.files[i], 0)?;
+            let found = delta.session.session_id.clone();
+            if !found.is_empty() && !ids.contains(&found) {
+                ids.push(found);
+            }
+            reread.insert(i);
+            parsed.push((i, prepare(ctx, delta, None)));
+        }
+        k += 1;
     }
     let db = ctx.db;
     let stored = db.transaction(|| {
-        db.delete_session_messages(sid)?;
-        let mut stored = Vec::with_capacity(group.len());
-        for (file, delta) in group.iter().zip(deltas) {
-            stored.push(store_delta(ctx, file, delta)?);
+        for id in &ids {
+            db.delete_session_messages(id)?;
+        }
+        let mut stored = Vec::with_capacity(parsed.len());
+        for (i, p) in &parsed {
+            stored.push(store(ctx, &family.files[*i], p)?);
         }
         Ok(stored)
     })?;
@@ -183,7 +219,7 @@ fn reindex_session(
         stats.messages_added += added;
         touched_sessions.insert(session_id);
     }
-    Ok(())
+    Ok(ids)
 }
 
 /// Deduplicate discovered files by `file_key`, keeping the first occurrence
@@ -200,14 +236,16 @@ fn dedup_by_file_key(files: Vec<SessionFile>) -> Vec<SessionFile> {
 }
 
 /// Fold a single file into the database, honoring the freshness scan and the
-/// persisted watermark. `existing` is the file's tracked row, if any.
+/// persisted watermark. The file row is read again here, right before the
+/// parse, so a sync that ran meanwhile is not read twice.
 fn index_file(
     ctx: &mut FileCtx,
     file: &SessionFile,
-    existing: Option<FileRow>,
     touched_sessions: &mut HashSet<String>,
     stats: &mut SyncStats,
 ) -> Result<()> {
+    let existing = ctx.db.get_file(&file.file_key)?;
+
     // Freshness scan: an already-tracked file whose size and mtime are both
     // unchanged cannot have grown, so skip it without touching the disk. A
     // file that an older parser read is not skipped, so its version updates.
@@ -221,13 +259,14 @@ fn index_file(
 
     let watermark = existing.as_ref().map(|r| r.watermark).unwrap_or(0);
     let delta = ctx.source.parse(file, watermark as u64)?;
+    let prepared = prepare(ctx, delta, stored_session(&existing));
 
     // Fold the whole file into the DB atomically. One transaction collapses
     // this file's hundreds of inserts (messages + both FTS indexes) into a
     // single commit — the dominant cost of a cold index — and keeps each
     // file's messages, session rollup, and advanced watermark consistent.
     let db = ctx.db;
-    let (session_id, added) = db.transaction(|| store_delta(ctx, file, delta))?;
+    let (session_id, added) = db.transaction(|| store(ctx, file, &prepared))?;
 
     stats.files_indexed += 1;
     stats.messages_added += added;
@@ -235,17 +274,33 @@ fn index_file(
     Ok(())
 }
 
-/// Store one parsed delta of `file`: its messages, the session rollup, the
-/// file row, its watermark and the parser version. Returns the session id
-/// and the number of messages added. Call it inside a transaction.
-fn store_delta(
+/// A parsed delta made ready to store.
+struct Prepared {
+    meta: SessionMeta,
+    messages: Vec<crate::model::MessageRecord>,
+    new_watermark: u64,
+}
+
+/// Get a delta ready to store, outside any transaction: resolve the repo id
+/// (git runs here), fold in the source account, and, when the parse found no
+/// session id (a later part of a Codex file has no `session_meta`), use
+/// `known_session`, the id stored for the file.
+fn prepare(
     ctx: &mut FileCtx,
-    file: &SessionFile,
     delta: crate::source::ParsedDelta,
-) -> Result<(String, usize)> {
-    let db = ctx.db;
-    // Resolve repo identity from the session's working directory, if any.
+    known_session: Option<&str>,
+) -> Prepared {
     let mut meta = delta.session;
+    let mut messages = delta.messages;
+    if meta.session_id.is_empty() {
+        if let Some(known) = known_session {
+            meta.session_id = known.to_string();
+            for m in messages.iter_mut().filter(|m| m.session_id.is_empty()) {
+                m.session_id = known.to_string();
+            }
+        }
+    }
+    // Resolve repo identity from the session's working directory, if any.
     if let Some(cwd) = meta.project_path.clone() {
         meta.repo_id = Some(resolve_repo_id(ctx.git, &cwd, ctx.repo_cache));
     }
@@ -253,16 +308,28 @@ fn store_delta(
     if meta.account.is_none() && !is_empty_account(ctx.account) {
         meta.account = Some(ctx.account.clone());
     }
-    let session_id = meta.session_id.clone();
-    let added = delta.messages.len();
-    for m in &delta.messages {
+    Prepared {
+        meta,
+        messages,
+        new_watermark: delta.new_watermark,
+    }
+}
+
+/// Store one prepared delta of `file`: its messages, the session rollup, the
+/// file row, its watermark and the parser version. Returns the session id
+/// and the number of messages added. Call it inside a transaction.
+fn store(ctx: &FileCtx, file: &SessionFile, p: &Prepared) -> Result<(String, usize)> {
+    let db = ctx.db;
+    let session_id = p.meta.session_id.clone();
+    let added = p.messages.len();
+    for m in &p.messages {
         db.insert_message(ctx.source_id, m)?;
     }
     let prior = db.session_msg_count(&session_id)?.unwrap_or(0);
-    let summary = session_summary(&meta);
+    let summary = session_summary(&p.meta);
     db.upsert_session(
         ctx.source_id,
-        &meta,
+        &p.meta,
         prior + added as i64,
         summary.as_deref(),
     )?;
@@ -274,7 +341,7 @@ fn store_delta(
         file.mtime,
         Some(&session_id),
     )?;
-    db.set_watermark(&file.file_key, delta.new_watermark as i64)?;
+    db.set_watermark(&file.file_key, p.new_watermark as i64)?;
     db.set_parser_version(&file.file_key, ctx.version)?;
     Ok((session_id, added))
 }
@@ -548,6 +615,84 @@ mod tests {
         // Version 1 again: nothing to do.
         let stats = sync(&[boxed(versioned_source(1, true))], &db, &git).unwrap();
         assert_eq!((stats.files_skipped, stats.files_indexed), (5, 0));
+    }
+
+    #[test]
+    fn a_reread_follows_a_transcript_that_switched_session_ids() {
+        // Pass 1: the main transcript of S and its subagent file.
+        let db = Db::open(":memory:").unwrap();
+        let git = FakeGitRunner::default();
+        let mut src = FakeSource::new(Tool::ClaudeCode);
+        src.add_file("main", "/p/S.jsonl", 100, 10);
+        src.add_delta("main", 0, 100, "S", Some("/w"), &["a"]);
+        src.add_file("sub", "/p/S/subagents/x.jsonl", 50, 10);
+        src.add_delta("sub", 0, 50, "S", Some("/w"), &["c"]);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        // Pass 2: the main file grew, and the new part carries another
+        // session id F, so the file row now says F.
+        let mut src = FakeSource::new(Tool::ClaudeCode);
+        src.add_file("main", "/p/S.jsonl", 150, 11);
+        src.add_delta("main", 100, 150, "F", Some("/w"), &["x"]);
+        src.add_file("sub", "/p/S/subagents/x.jsonl", 50, 10);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        assert_eq!(
+            db.get_file("main").unwrap().unwrap().session_id.as_deref(),
+            Some("F")
+        );
+        // Pass 3, a newer parser: the full read of the main file says S.
+        let mut src = FakeSource::new(Tool::ClaudeCode);
+        src.version = 1;
+        src.add_file("main", "/p/S.jsonl", 150, 11);
+        src.add_delta("main", 0, 150, "S", Some("/w"), &["a", "x"]);
+        src.add_file("sub", "/p/S/subagents/x.jsonl", 50, 10);
+        src.add_delta("sub", 0, 50, "S", Some("/w"), &["c"]);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='S'"),
+            3
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='F'"),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT msg_count FROM sessions WHERE session_id='S'"),
+            3
+        );
+    }
+
+    #[test]
+    fn a_part_without_a_session_id_joins_the_stored_session() {
+        let db = Db::open(":memory:").unwrap();
+        let git = FakeGitRunner::default();
+        let mut src = FakeSource::new(Tool::Codex);
+        src.add_file("k", "/r.jsonl", 100, 10);
+        src.add_delta("k", 0, 100, "S", Some("/w"), &["a"]);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        let mut src = FakeSource::new(Tool::Codex);
+        src.add_file("k", "/r.jsonl", 150, 11);
+        src.add_delta("k", 100, 150, "", None, &["b"]);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id='S'"),
+            2
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM messages WHERE session_id=''"),
+            0
+        );
+        assert_eq!(
+            db.get_file("k").unwrap().unwrap().session_id.as_deref(),
+            Some("S")
+        );
+        // A new file with no session id stays as it is.
+        let mut src = FakeSource::new(Tool::Codex);
+        src.add_file("e", "/e.jsonl", 1, 1);
+        sync(&[boxed(src)], &db, &git).unwrap();
+        assert_eq!(
+            db.get_file("e").unwrap().unwrap().session_id.as_deref(),
+            Some("")
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use super::{base_info, is_uuid, resume_command, Agent, AgentContext};
+use super::{automated_if_marker, base_info, is_uuid, resume_command, Agent, AgentContext};
 use crate::model::Origin;
 use crate::source::claude::parse_iso8601_secs;
 use crate::tabs::process::Process;
@@ -194,11 +194,11 @@ impl Agent for CodexAgent {
     }
 
     /// `codex exec` (alias `e`) runs without a person (checked in
-    /// `codex --help`). Only the first word that is not a flag counts.
+    /// `codex --help`). Only the first word that is not a flag counts. `ps`
+    /// joins the command line with spaces, so an interactive prompt whose
+    /// first word is `exec` or `e` reads the same and is hidden too.
     fn origin(&self, p: &Process) -> Option<Origin> {
-        let args = p.arguments();
-        let sub = args.iter().find(|a| !a.starts_with('-'));
-        matches!(sub, Some(&"exec" | &"e")).then_some(Origin::Automated)
+        automated_if_marker(p, &["exec", "e"])
     }
 
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo {

@@ -46,8 +46,14 @@ Every session and every running agent gets an origin:
 
 Each session source sets `SessionMeta.origin` while it parses. Some parses cannot see the
 marker. One example is a later part of a Codex file, after the `session_meta`
-line. Such a parse returns `None`, and the index keeps the stored value
-(`COALESCE`). The index stores the origin in a new `sessions.origin` column.
+line. Such a parse returns `None`, and the index keeps the stored value. The index
+stores the origin in a new `sessions.origin` column.
+
+The origin never hides a session that the person drove. If any parse of a
+session says `user`, the session stays `user`. For example, a `claude -p`
+session that the person later resumes in a terminal becomes theirs.
+Otherwise the first known origin stays. A Claude parse follows the same rule
+inside one file: one event with a person's `entrypoint` is enough.
 
 | Tool        | Marker                                                         | Origin                       |
 |-------------|----------------------------------------------------------------|------------------------------|
@@ -83,9 +89,15 @@ the list. A full re-index takes about 105 seconds on the owner's index.
   size and time.
 - csx re-reads stale files per session: in one transaction, it deletes the
   session's messages (with their full-text rows and embeddings), resets the
-  message count, and parses every file of that session from the start. Until
-  that transaction commits, readers see the old rows. So the list never has a
-  gap.
+  message count and the origin, and parses every file of that session from
+  the start. Until that transaction commits, readers see the old rows. So the
+  list never has a gap.
+- A transcript can switch session ids in the middle. Then the id stored for
+  a file can differ from the id that a full read gives. The re-read follows
+  every id that a full read finds, pulls in the files stored under that id,
+  and replaces all of those sessions in the same transaction.
+- A part of a file with no session id (a later part of a Codex file) joins
+  the session id already stored for that file.
 - New columns come from a helper that adds a missing column to an existing
   table. No other schema change.
 
@@ -104,14 +116,19 @@ The process list classifies running agents for all tools, in two layers.
    `-p` or `--print`. All three were checked in the installed CLIs' help.
    The generic tools get a `print_markers` list in `NamedTool`, empty for now,
    because none of those tools is installed to check against.
+   A marker counts only as a flag before the first word that is not a flag,
+   or as that first word (a subcommand). `ps` joins the command line with
+   spaces, so the words of a quoted prompt look like arguments. This rule
+   ignores them after the first one.
 
 Ancestry wins over markers. A process with neither is unknown, so it shows.
 The `live_sessions` set that hides running sessions from the closed list still
 uses every detected agent, also the hidden ones.
 
-`AgentInfo` gets `origin`. The detection keeps one agent per tool and tty. It
-now prefers a shown agent over a hidden one on the same tty. Then a hidden job
-never takes the place of the session that the person drives.
+`AgentInfo` gets `origin`. The detection keeps one shown agent and one
+hidden agent per tool and tty. Shown agents come first, so they get the tab.
+Then a hidden job never takes the place of the session that the person
+drives, and the job's session still counts as running.
 
 ## Output and flags
 
@@ -134,6 +151,14 @@ never takes the place of the session that the person drives.
   changes what it stores, bump `parser_version()`.
 - A running tool: implement `Agent::origin`, or fill `print_markers` for a
   generic tool. Ancestry needs no work.
+
+## Known limits
+
+- Claude Code sessions with an `sdk-` entrypoint are hidden. A desktop app
+  or editor that drives Claude Code through the Agent SDK writes such a
+  value too, so its sessions are hidden until `--automated` is used.
+- An interactive Codex prompt whose first word is `exec` or `e` reads the
+  same as `codex exec` in `ps`, so that running session is hidden.
 
 ## Non-goals
 

@@ -294,7 +294,12 @@ that csx knows:
 - `claude -p`, `claude --print`, `devin -p`, `devin --print` and
   `codex exec` are automated.
 
-If a session runs in a hidden agent, it still does not show as closed.
+If any part of a session says that you drove it, csx keeps it as yours. A
+`claude -p` session that you later resume in a terminal is shown. If a
+session runs in a hidden agent, it still does not show as closed.
+
+Some apps drive Claude Code through its SDK. Their sessions look automated,
+so add `--automated` to see them.
 
 After an upgrade that changes how csx reads sessions, the next `csx sync`
 reads the affected sessions again. csx replaces each session in one step, so

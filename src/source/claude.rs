@@ -206,8 +206,17 @@ fn map_events(
         // nothing about who started the session, and its user-role text is
         // the parent agent's task prompt, not the person's.
         let sidechain = value.get("isSidechain").and_then(Value::as_bool) == Some(true);
-        if origin.is_none() && !sidechain {
-            origin = str_field(value, "entrypoint").map(|e| origin_from_entrypoint(&e));
+        // Any event that the person drove makes the session theirs, for
+        // example a `claude -p` run that was later resumed in a terminal.
+        if origin != Some(Origin::User) && !sidechain {
+            if let Some(e) = str_field(value, "entrypoint") {
+                let o = origin_from_entrypoint(&e);
+                origin = if o == Origin::User {
+                    Some(o)
+                } else {
+                    origin.or(Some(o))
+                };
+            }
         }
         // Every event that carries a sessionId contributes it.
         if session_id.is_none() {
@@ -718,13 +727,21 @@ mod tests {
         assert_eq!(origin(vec![]), None);
         // A subagent file never decides the origin, even with an entrypoint.
         assert_eq!(origin(vec![ev(Some("cli"), Some(true))]), None);
-        // The first event with an entrypoint wins.
+        // Any event that the person drove wins over automated ones.
         assert_eq!(
             origin(vec![
                 ev(None, None),
                 ev(Some("sdk-ts"), None),
                 ev(Some("cli"), None)
             ]),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            origin(vec![ev(Some("cli"), None), ev(Some("sdk-cli"), None)]),
+            Some(Origin::User)
+        );
+        assert_eq!(
+            origin(vec![ev(Some("sdk-py"), None), ev(Some("sdk-cli"), None)]),
             Some(Origin::Automated)
         );
     }
