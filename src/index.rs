@@ -681,6 +681,11 @@ mod tests {
             count(&db, "SELECT COUNT(*) FROM messages WHERE session_id=''"),
             0
         );
+        // The part with no folder keeps the session's folder, so the session
+        // stays resumable.
+        let r = db.resumable_session("codex", "S").unwrap().unwrap();
+        assert_eq!(r.project_path.as_deref(), Some("/w"));
+        assert_eq!(r.project_name.as_deref(), Some("w"));
         assert_eq!(
             db.get_file("k").unwrap().unwrap().session_id.as_deref(),
             Some("S")

@@ -407,6 +407,9 @@ impl Db {
 
     /// Insert or replace a session's aggregate metadata.
     ///
+    /// A part of a session that does not name its folder, project, branch or
+    /// repo (a later part of a Codex file) keeps the stored values.
+    ///
     /// The origin never hides a session that the person drove: once any parse
     /// says `user`, it stays `user`. Otherwise the first known origin stays,
     /// and `None` keeps what is stored.
@@ -428,10 +431,10 @@ impl Db {
              ON CONFLICT(session_id) DO UPDATE SET
                 source_id    = excluded.source_id,
                 tool         = excluded.tool,
-                repo_id      = excluded.repo_id,
-                project_path = excluded.project_path,
-                project_name = excluded.project_name,
-                git_branch   = excluded.git_branch,
+                repo_id      = COALESCE(excluded.repo_id, sessions.repo_id),
+                project_path = COALESCE(excluded.project_path, sessions.project_path),
+                project_name = COALESCE(excluded.project_name, sessions.project_name),
+                git_branch   = COALESCE(excluded.git_branch, sessions.git_branch),
                 first_ts     = MIN(sessions.first_ts, excluded.first_ts),
                 last_ts      = MAX(sessions.last_ts, excluded.last_ts),
                 msg_count    = excluded.msg_count,
