@@ -1,6 +1,7 @@
 //! Rendering of tab rows: a human table, JSON, and Alfred script filter JSON.
 
 use super::{AgentStatus, ClosedSession, Row, TabsReport};
+use crate::model::Origin;
 use serde::Serialize;
 
 /// Longest title in the human table, in characters.
@@ -61,6 +62,15 @@ fn table<const N: usize>(rows: &[[String; N]]) -> String {
     out
 }
 
+/// The origin word for a row that lists hide by default (`automated` or
+/// `subagent`), so it stands out when `--automated` shows it. `None` for the
+/// person's sessions and unknown ones.
+fn origin_word(origin: Option<Origin>) -> Option<&'static str> {
+    origin
+        .filter(|_| Origin::hidden_by_default(origin))
+        .map(|o| o.as_str())
+}
+
 /// `s`, or `-` when it is empty.
 fn dash(s: &str) -> String {
     if s.is_empty() {
@@ -94,10 +104,15 @@ pub fn render_human(report: &TabsReport) -> String {
 fn rows_table(report_rows: &[Row]) -> String {
     let mut rows = vec![["TERMINAL", "TITLE", "CWD", "AGENT", "REF"].map(String::from)];
     for r in report_rows {
-        let agent = r.agent.as_ref().map_or(String::new(), |a| match a.status {
-            AgentStatus::Busy => format!("{} busy", a.tool),
-            AgentStatus::Idle => format!("{} idle", a.tool),
-            AgentStatus::Unknown => a.tool.clone(),
+        let agent = r.agent.as_ref().map_or(String::new(), |a| {
+            let mut words = vec![a.tool.as_str()];
+            match a.status {
+                AgentStatus::Busy => words.push("busy"),
+                AgentStatus::Idle => words.push("idle"),
+                AgentStatus::Unknown => {}
+            }
+            words.extend(origin_word(a.origin));
+            words.join(" ")
         });
         rows.push([
             dash(&r.terminal),
@@ -119,11 +134,11 @@ fn closed_table(closed: &[ClosedSession]) -> String {
         .iter()
         .map(|c| {
             let title = c.title.as_deref().map(one_line).unwrap_or_default();
-            [
-                c.tool.clone(),
-                dash(&cut(&title, HUMAN_TITLE_MAX)),
-                c.cwd.clone(),
-            ]
+            let tool = match origin_word(c.origin) {
+                Some(w) => format!("{} {w}", c.tool),
+                None => c.tool.clone(),
+            };
+            [tool, dash(&cut(&title, HUMAN_TITLE_MAX)), c.cwd.clone()]
         })
         .collect();
     table(&rows)
@@ -271,6 +286,7 @@ fn subtitle(r: &Row, home: Option<&str>, now_ms: i64) -> String {
             AgentStatus::Idle => parts.push("○ idle".into()),
             AgentStatus::Unknown => {}
         }
+        parts.extend(origin_word(a.origin).map(String::from));
         parts.extend(a.updated_at.map(|t| ago(t, now_ms)));
         parts.push(a.tool.clone());
     }
@@ -326,6 +342,7 @@ fn closed_item(c: &ClosedSession, home: Option<&str>, now_ms: i64) -> AlfredItem
         title
     };
     let mut parts = vec!["closed".to_string()];
+    parts.extend(origin_word(c.origin).map(String::from));
     parts.extend(c.updated_at.map(|t| ago(t, now_ms)));
     parts.push(c.tool.clone());
     parts.push(shorten_home(&c.cwd, home));
@@ -637,6 +654,39 @@ mod tests {
         assert_eq!(items[1]["subtitle"], "closed · 2d ago · codex · ~/x");
     }
 
+    #[test]
+    fn hidden_origins_are_named_in_every_output() {
+        let mut job = row("ghostty", Some("ghostty:1"), "zsh", Some("/Users/me/w"));
+        job.agent = Some(AgentInfo {
+            tool: "claude-code".into(),
+            status: AgentStatus::Busy,
+            origin: Some(Origin::Automated),
+            ..AgentInfo::default()
+        });
+        let mut mine = row("ghostty", Some("ghostty:2"), "zsh", None);
+        mine.agent = Some(AgentInfo {
+            tool: "codex".into(),
+            origin: Some(Origin::User),
+            ..AgentInfo::default()
+        });
+        let mut r = report(vec![job, mine], &[]);
+        r.closed = Some(vec![ClosedSession {
+            origin: Some(Origin::Subagent),
+            ..closed("codex", "u1", Some("t"), "/Users/me/x")
+        }]);
+        let items = alfred(&r);
+        assert_eq!(
+            items[0]["subtitle"],
+            "● busy · automated · claude-code · ghostty · ~/w"
+        );
+        assert_eq!(items[1]["subtitle"], "codex · ghostty");
+        assert_eq!(items[2]["subtitle"], "closed · subagent · codex · ~/x");
+        let human = render_human(&r);
+        assert!(human.contains("claude-code busy automated"), "{human}");
+        assert!(human.contains("codex subagent  t"), "{human}");
+        assert!(!human.contains("codex user"), "{human}");
+    }
+
     fn alfred(r: &TabsReport) -> Vec<Value> {
         let v: Value = serde_json::from_str(&render_alfred_with_home(r, Some("/Users/me"), NOW))
             .expect("valid json");
@@ -886,6 +936,7 @@ mod tests {
                 status: AgentStatus::Busy,
                 updated_at: Some(1_793_156_134_829),
                 resume_command: s("cd '/Users/me/work/acme' && claude --resume 0f1e2d3c"),
+                origin: Some(crate::model::Origin::User),
             }),
         };
         let plain = Tab {
@@ -924,6 +975,7 @@ mod tests {
             resume_command:
                 "cd '/Users/me/work/acme-web' && claude --resume 4a5b6c7d-0000-4000-8000-00000000beef"
                     .into(),
+            origin: Some(crate::model::Origin::User),
         }]);
         let got: Value = serde_json::from_str(&render_json(&r)).unwrap();
         let want: Value = serde_json::from_str(include_str!(

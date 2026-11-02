@@ -11,6 +11,7 @@ use super::TerminalBackend;
 use super::{matches_query, sort_rows, tmux, AgentInfo, Ports, Row, Tab, TabsReport};
 use crate::agent::{self, Agent, AgentContext};
 use crate::error::{Error, Result};
+use crate::model::Origin;
 
 /// What to list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,6 +24,9 @@ pub struct ListOptions {
     pub query: Vec<String>,
     /// List up to this many closed sessions; `None` lists none.
     pub closed: Option<usize>,
+    /// Also list agents and sessions that a program or another agent started
+    /// (see [`Origin::hidden_by_default`]).
+    pub automated: bool,
 }
 
 /// Every supported terminal backend: ghostty, iterm2, terminal, kitty, wezterm.
@@ -112,7 +116,12 @@ pub fn list(
             Vec::new()
         }
     };
+    // Hidden agents still count as running, so their sessions never look closed.
     let live_sessions = found.iter().filter_map(|a| a.session_id.clone()).collect();
+    let found: Vec<AgentInfo> = found
+        .into_iter()
+        .filter(|a| opts.automated || !Origin::hidden_by_default(a.origin))
+        .collect();
     let left = attach_by_tty(&mut rows, found);
     let left = attach_ghostty_by_title(&mut rows, left);
     rows.extend(left.into_iter().map(agent_row));
@@ -514,6 +523,51 @@ mod tests {
         assert!(r.rows.is_empty());
         assert_eq!(r.live_sessions, ["on-iterm"]);
         assert_eq!(r.closed, None);
+    }
+
+    #[test]
+    fn hidden_agents_show_only_on_request_but_stay_live() {
+        let l = log();
+        let ps = [ps_line(10, "ttys001"), ps_line(11, "ttys002")].concat();
+        let os = FakeOs::new(&l).answer("ps -axo", &ps);
+        let backends = || {
+            vec![FakeBackend::new("iterm2", &l)
+                .tabs(vec![
+                    with_tty(tab("iterm2", "iterm2:a", "s", 1, 1), "ttys001"),
+                    with_tty(tab("iterm2", "iterm2:b", "t", 1, 2), "ttys002"),
+                ])
+                .boxed()]
+        };
+        let mut job = agent(10, None, None);
+        job.session_id = Some("job".into());
+        job.origin = Some(Origin::Automated);
+        let mut mine = agent(11, None, None);
+        mine.origin = Some(Origin::User);
+        let agents_only = ListOptions {
+            agents_only: true,
+            ..opts()
+        };
+        let r = run_list(
+            &os,
+            backends(),
+            vec![job.clone(), mine.clone()],
+            &agents_only,
+        );
+        assert_eq!(ids(&r.rows), ["iterm2:b"]);
+        assert_eq!(r.live_sessions, ["job"]);
+        // In the all-tabs list, the tab stays but without the hidden agent.
+        let r = run_list(&os, backends(), vec![job.clone(), mine.clone()], &opts());
+        assert_eq!(r.rows.len(), 2);
+        assert!(r
+            .rows
+            .iter()
+            .any(|t| t.ref_.as_deref() == Some("iterm2:a") && t.agent.is_none()));
+        let with = ListOptions {
+            automated: true,
+            ..agents_only
+        };
+        let r = run_list(&os, backends(), vec![job, mine], &with);
+        assert_eq!(r.rows.len(), 2);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::agent::claude::{read_tail, scan_transcript, slug, TranscriptInfo};
 use crate::agent::{resume_line, session_env, RESUMABLE_TOOLS};
 use crate::db::{Db, ResumableSession};
 use crate::error::Result;
+use crate::model::Origin;
 
 /// Longest title taken from a first prompt, in characters.
 const TITLE_CHARS: usize = 80;
@@ -21,6 +22,8 @@ pub struct ClosedOptions {
     pub limit: usize,
     /// Query words; every word must match a session.
     pub query: Vec<String>,
+    /// Also list sessions that a program or another agent started.
+    pub automated: bool,
 }
 
 /// Closed sessions, newest first: indexed sessions of [`RESUMABLE_TOOLS`]
@@ -39,6 +42,9 @@ pub fn list_closed(
             break;
         }
         if live.contains(&s.session_id) {
+            continue;
+        }
+        if !opts.automated && Origin::hidden_by_default(s.origin) {
             continue;
         }
         let Some(cwd) = s.project_path.as_deref() else {
@@ -98,6 +104,7 @@ fn entry(
         last_prompt: tr.last_prompt.or(last),
         updated_at: s.last_ts.map(|t| t * 1000),
         resume_command,
+        origin: s.origin,
     })
 }
 
@@ -147,6 +154,7 @@ pub fn add_closed(report: &mut TabsReport, db: &Db, opts: &ListOptions, home: &P
     let closed_opts = ClosedOptions {
         limit,
         query: opts.query.clone(),
+        automated: opts.automated,
     };
     match list_closed(db, &report.live_sessions, &closed_opts, home) {
         Ok(closed) => report.closed = Some(closed),
@@ -240,6 +248,7 @@ mod tests {
         ClosedOptions {
             limit,
             query: query.iter().map(|q| q.to_string()).collect(),
+            automated: false,
         }
     }
 
@@ -416,6 +425,55 @@ mod tests {
                 other.display()
             )
         );
+    }
+
+    #[test]
+    fn automated_and_subagent_sessions_show_only_on_request() {
+        let root = tmp("origin");
+        let home = root.join("home");
+        let db = Db::open(":memory:").unwrap();
+        let codex = source(&db, "codex", None);
+        let p = folder(&root, "acme");
+        const U4: &str = "44444444-4444-4444-8444-444444444444";
+        for (id, ts, origin) in [
+            (U1, 40, Some("user")),
+            (U2, 30, Some("automated")),
+            (U3, 20, Some("subagent")),
+            (U4, 10, None),
+        ] {
+            session(&db, codex, Tool::Codex, id, Some(&p), None, ts);
+            db.conn()
+                .execute(
+                    "UPDATE sessions SET origin = ?1 WHERE session_id = ?2",
+                    rusqlite::params![origin, id],
+                )
+                .unwrap();
+        }
+        let shown = list_closed(&db, &[], &opts(10, &[]), &home).unwrap();
+        assert_eq!(ids(&shown), [U1, U4]);
+        assert_eq!(shown[0].origin, Some(Origin::User));
+        assert_eq!(shown[1].origin, None);
+        let all = ClosedOptions {
+            automated: true,
+            ..opts(10, &[])
+        };
+        let every = list_closed(&db, &[], &all, &home).unwrap();
+        assert_eq!(ids(&every), [U1, U2, U3, U4]);
+        assert_eq!(every[2].origin, Some(Origin::Subagent));
+        // The limit counts only listed sessions.
+        assert_eq!(
+            ids(&list_closed(&db, &[], &opts(2, &[]), &home).unwrap()),
+            [U1, U4]
+        );
+        // add_closed passes the option through.
+        let mut report = TabsReport::default();
+        let with = ListOptions {
+            closed: Some(10),
+            automated: true,
+            ..ListOptions::default()
+        };
+        add_closed(&mut report, &db, &with, &home);
+        assert_eq!(report.closed.unwrap().len(), 4);
     }
 
     #[test]

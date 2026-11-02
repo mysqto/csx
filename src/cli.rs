@@ -250,6 +250,10 @@ pub enum Command {
         /// Most closed sessions to list.
         #[arg(long, value_name = "N", default_value_t = 50)]
         closed_limit: usize,
+        /// Also list agents and sessions that a program or another agent
+        /// started: print mode, an SDK, `codex exec`, subagents.
+        #[arg(long)]
+        automated: bool,
         /// kitty remote-control socket, such as `unix:/var/folders/x/T/kitty-1234`. Default:
         /// `KITTY_LISTEN_ON`, else the `<TMPDIR>/kitty-<pid>` of each running kitty.
         #[arg(long)]
@@ -690,6 +694,7 @@ pub fn dispatch(
             alfred,
             closed,
             closed_limit,
+            automated,
             kitty_socket,
             query,
         }) => {
@@ -708,6 +713,7 @@ pub fn dispatch(
                     .map(String::from)
                     .collect(),
                 closed: closed.then_some(closed_limit),
+                automated,
             };
             let now = crate::tabs::render::now_ms();
             handle_tabs(db, tabs, &opts, kitty_socket, output, now, out)
@@ -1807,7 +1813,7 @@ mod tests {
         assert_eq!(
             format!("{:?}", cli.command),
             "Some(Tabs { action: None, agents: true, terminals: [\"ghostty\", \"tmux\"], \
-             json: true, alfred: false, closed: false, closed_limit: 50, \
+             json: true, alfred: false, closed: false, closed_limit: 50, automated: false, \
              kitty_socket: Some(\"unix:/tmp/k\"), query: [\"fix\", \"bug\"] })"
         );
     }
@@ -1820,7 +1826,7 @@ mod tests {
                 parse(&["csx", "tabs", "focus", "tty:ttys012"]).command
             ),
             "Some(Tabs { action: Some(Focus { tab_ref: \"tty:ttys012\", kitty_socket: None }), agents: false, \
-             terminals: [], json: false, alfred: false, closed: false, closed_limit: 50, \
+             terminals: [], json: false, alfred: false, closed: false, closed_limit: 50, automated: false, \
              kitty_socket: None, query: [] })"
         );
         assert!(format!(
@@ -2061,11 +2067,14 @@ tabs_hotkey: None, agents_hotkey: None } })"
         run_tabs(&[&args[..], &["--json"]].concat(), &tabs).unwrap();
         run_tabs(&["csx", "tabs", "--closed", "fix"], &tabs).unwrap();
         run_tabs(&["csx", "tabs", "--closed-limit", "5"], &tabs).unwrap();
+        run_tabs(&["csx", "tabs", "--closed", "--automated"], &tabs).unwrap();
         let seen = tabs.seen.borrow();
         assert_eq!(
             seen[0],
-            "list ListOptions { agents_only: true, terminals: [], query: [], closed: Some(5) } None"
+            "list ListOptions { agents_only: true, terminals: [], query: [], closed: Some(5), \
+             automated: false } None"
         );
+        assert!(seen[3].contains("automated: true"), "{}", seen[3]);
         assert!(
             seen[1].contains("query: [\"fix\"], closed: Some(50)"),
             "{}",

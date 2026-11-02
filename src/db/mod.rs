@@ -1592,6 +1592,26 @@ mod tests {
     }
 
     #[test]
+    fn origin_and_reread_helpers_report_sql_errors() {
+        // Each step of the delete fails in turn when its table is gone.
+        for table in ["messages_trg", "messages_text", "sessions", "messages"] {
+            let (db, _, _) = fixture();
+            db.conn()
+                .execute_batch(&format!("DROP TABLE {table};"))
+                .unwrap();
+            assert!(db.delete_session_messages("s1").is_err(), "{table}");
+        }
+        let (db, _, _) = fixture();
+        db.conn()
+            .execute_batch("CREATE TABLE embeddings (x INTEGER);")
+            .unwrap();
+        assert!(db.delete_session_messages("s1").is_err());
+        db.conn().execute_batch("DROP TABLE files;").unwrap();
+        assert!(db.set_parser_version("k", 1).is_err());
+        assert!(!db.has_column("files", "parser_version").unwrap());
+    }
+
+    #[test]
     fn set_parser_version_updates_the_file_row() {
         let db = Db::open(":memory:").unwrap();
         assert_eq!(db.set_parser_version("ghost", 1).unwrap(), 0);

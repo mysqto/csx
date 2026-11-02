@@ -9,7 +9,8 @@
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use super::{base_info, resume_line, Agent, AgentContext};
+use super::{automated_if_flag, base_info, resume_line, Agent, AgentContext};
+use crate::model::Origin;
 use crate::source::devin::open_readonly;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -92,6 +93,11 @@ impl Agent for DevinAgent {
 
     fn matches(&self, p: &Process) -> bool {
         p.program() == "devin"
+    }
+
+    /// `-p` / `--print` runs without a person (checked in `devin --help`).
+    fn origin(&self, p: &Process) -> Option<Origin> {
+        automated_if_flag(p, &["-p", "--print"])
     }
 
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo {

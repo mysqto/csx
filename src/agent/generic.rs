@@ -1,6 +1,7 @@
 //! Generic agent detection for other AI tools.
 
-use super::{base_info, Agent, AgentContext};
+use super::{automated_if_flag, base_info, Agent, AgentContext};
+use crate::model::Origin;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
 
@@ -11,10 +12,15 @@ pub struct NamedTool {
     pub tool: &'static str,
     /// Program names that identify the tool.
     pub programs: &'static [&'static str],
+    /// Command-line words that mean the tool runs without a person, such as a
+    /// print-mode flag. Empty when not checked against the tool's own help.
+    pub print_markers: &'static [&'static str],
 }
 
 macro_rules! tools {
-    ($($n:literal),*) => { &[$(NamedTool { tool: $n, programs: &[$n] }),*] };
+    ($($n:literal),*) => {
+        &[$(NamedTool { tool: $n, programs: &[$n], print_markers: &[] }),*]
+    };
 }
 
 /// Tools detected by name, with tool id equal to the program name.
@@ -43,6 +49,10 @@ impl Agent for NamedTool {
 
     fn enrich(&self, p: &Process, _ctx: &AgentContext) -> AgentInfo {
         base_info(self.tool, p)
+    }
+
+    fn origin(&self, p: &Process) -> Option<Origin> {
+        automated_if_flag(p, self.print_markers)
     }
 }
 

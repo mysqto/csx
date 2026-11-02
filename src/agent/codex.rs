@@ -9,6 +9,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use super::{base_info, is_uuid, resume_command, Agent, AgentContext};
+use crate::model::Origin;
 use crate::source::claude::parse_iso8601_secs;
 use crate::tabs::process::Process;
 use crate::tabs::AgentInfo;
@@ -190,6 +191,14 @@ impl Agent for CodexAgent {
 
     fn matches(&self, p: &Process) -> bool {
         p.program() == "codex"
+    }
+
+    /// `codex exec` (alias `e`) runs without a person (checked in
+    /// `codex --help`). Only the first word that is not a flag counts.
+    fn origin(&self, p: &Process) -> Option<Origin> {
+        let args = p.arguments();
+        let sub = args.iter().find(|a| !a.starts_with('-'));
+        matches!(sub, Some(&"exec" | &"e")).then_some(Origin::Automated)
     }
 
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo {

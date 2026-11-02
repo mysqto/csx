@@ -79,6 +79,32 @@ impl Process {
         first.to_string()
     }
 
+    /// The command-line words after the program: after argv[0], or for an
+    /// interpreter after the module (`-m <module>`) or script that
+    /// [`Process::program`] names.
+    pub fn arguments(&self) -> Vec<&str> {
+        let toks: Vec<&str> = self.args.split_whitespace().collect();
+        if !self.runs_under_interpreter() {
+            return toks.into_iter().skip(1).collect();
+        }
+        let mut i = 1;
+        while i < toks.len() {
+            if toks[i] == "-m" {
+                return toks.into_iter().skip(i + 2).collect();
+            }
+            if !toks[i].starts_with('-') {
+                return toks.into_iter().skip(i + 1).collect();
+            }
+            i += 1;
+        }
+        Vec::new()
+    }
+
+    /// True when argv[0] is an interpreter such as `node` or `python3.12`.
+    pub fn runs_under_interpreter(&self) -> bool {
+        is_interpreter(basename(self.args.split_whitespace().next().unwrap_or("")))
+    }
+
     /// True when the process is in the foreground group of its tty.
     pub fn is_foreground(&self) -> bool {
         self.pgid == self.tpgid
@@ -159,6 +185,24 @@ impl ProcessTable {
         self.procs.iter().find(|p| p.pid == pid)
     }
 
+    /// The ancestors of `p`, nearest first: its parent, the parent's parent,
+    /// and so on, while each one is in the table. Stops at a repeated pid, so
+    /// a broken table cannot loop.
+    pub fn ancestors<'a>(&'a self, p: &Process) -> Vec<&'a Process> {
+        let mut out: Vec<&Process> = Vec::new();
+        let mut seen = vec![p.pid];
+        let mut next = p.ppid;
+        while let Some(q) = self.get(next) {
+            if seen.contains(&q.pid) {
+                break;
+            }
+            seen.push(q.pid);
+            out.push(q);
+            next = q.ppid;
+        }
+        out
+    }
+
     /// All processes whose controlling tty is `tty`.
     pub fn on_tty(&self, tty: &str) -> Vec<&Process> {
         self.procs
@@ -172,6 +216,55 @@ impl ProcessTable {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    fn p(pid: u32, ppid: u32, args: &str) -> Process {
+        Process {
+            pid,
+            ppid,
+            pgid: pid,
+            tpgid: 0,
+            tty: None,
+            elapsed_secs: 0,
+            args: args.into(),
+        }
+    }
+
+    #[test]
+    fn arguments_follow_the_program() {
+        assert_eq!(p(1, 0, "claude -p hi").arguments(), ["-p", "hi"]);
+        assert_eq!(p(1, 0, "/bin/codex").arguments(), Vec::<&str>::new());
+        assert_eq!(
+            p(1, 0, "node --no-warnings /opt/codex/bin/codex.js exec x").arguments(),
+            ["exec", "x"]
+        );
+        assert_eq!(
+            p(1, 0, "python3.12 -m aider --message m").arguments(),
+            ["--message", "m"]
+        );
+        assert_eq!(p(1, 0, "node --inspect").arguments(), Vec::<&str>::new());
+        assert!(p(1, 0, "node x.js").runs_under_interpreter());
+        assert!(!p(1, 0, "claude").runs_under_interpreter());
+        assert!(!p(1, 0, "").runs_under_interpreter());
+    }
+
+    #[test]
+    fn ancestors_walk_up_and_stop_at_a_loop() {
+        let t = ProcessTable {
+            procs: vec![
+                p(1, 0, "launchd"),
+                p(10, 1, "zsh"),
+                p(20, 10, "claude"),
+                p(30, 20, "sh"),
+            ],
+        };
+        let pids = |v: Vec<&Process>| v.iter().map(|q| q.pid).collect::<Vec<_>>();
+        assert_eq!(pids(t.ancestors(t.get(30).unwrap())), [20, 10, 1]);
+        assert_eq!(pids(t.ancestors(&p(99, 77, "x"))), Vec::<u32>::new());
+        let looped = ProcessTable {
+            procs: vec![p(5, 6, "a"), p(6, 5, "b")],
+        };
+        assert_eq!(pids(looped.ancestors(looped.get(5).unwrap())), [6]);
+    }
 
     fn proc(args: &str) -> Process {
         Process {

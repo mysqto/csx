@@ -7,6 +7,7 @@ pub mod generic;
 
 use std::path::{Path, PathBuf};
 
+use crate::model::Origin;
 use crate::tabs::process::{Process, ProcessTable};
 use crate::tabs::AgentInfo;
 
@@ -121,6 +122,25 @@ pub trait Agent {
     fn matches(&self, p: &Process) -> bool;
     /// Fill an [`AgentInfo`] for `p`. Never fails; missing data is `None`.
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo;
+    /// What the command line of `p` says about who started it, for example
+    /// `Some(Origin::Automated)` for a print-mode flag. The default is `None`
+    /// (unknown). [`detect`] checks the process ancestry first, for every tool.
+    fn origin(&self, _p: &Process) -> Option<Origin> {
+        None
+    }
+}
+
+/// True when one of `flags` is a word of `args` before a `--`, after which
+/// the words are a prompt.
+pub(crate) fn has_flag(args: &[&str], flags: &[&str]) -> bool {
+    args.iter()
+        .take_while(|a| **a != "--")
+        .any(|a| flags.contains(a))
+}
+
+/// [`Origin::Automated`] when `p` has one of `flags`, else `None`.
+pub(crate) fn automated_if_flag(p: &Process, flags: &[&str]) -> Option<Origin> {
+    has_flag(&p.arguments(), flags).then_some(Origin::Automated)
 }
 
 /// The info every tool provides: tool id, pid and tty.
@@ -146,20 +166,48 @@ pub fn registry() -> Vec<Box<dyn Agent>> {
     v
 }
 
-/// Lower is better: foreground first, then the lowest pid.
-fn rank(p: &Process) -> (bool, u32) {
-    (!p.is_foreground(), p.pid)
+/// Lower is better: shown before hidden, then foreground, then the lowest
+/// pid. So a hidden job never takes the place of the person's session.
+fn rank(p: &Process, origin: Option<Origin>) -> (bool, bool, u32) {
+    (Origin::hidden_by_default(origin), !p.is_foreground(), p.pid)
+}
+
+/// Who started agent process `p` of tool `agent`. Ancestry first, for every
+/// tool: an agent process with another agent process above it is a
+/// [`Origin::Subagent`] job. The direct parent does not count when it is the
+/// same tool under an interpreter, because that is a launcher such as
+/// `node .../codex`. Then the tool's own [`Agent::origin`].
+fn origin_of(
+    table: &ProcessTable,
+    agents: &[Box<dyn Agent>],
+    agent: &dyn Agent,
+    p: &Process,
+) -> Option<Origin> {
+    let ancestors = table.ancestors(p);
+    for (i, q) in ancestors.iter().enumerate() {
+        let Some(owner) = agents.iter().find(|a| a.matches(q)) else {
+            continue;
+        };
+        let launcher = i == 0 && owner.tool() == agent.tool() && q.runs_under_interpreter();
+        if !launcher {
+            return Some(Origin::Subagent);
+        }
+    }
+    agent.origin(p)
 }
 
 /// One [`AgentInfo`] per matching process that has a tty (a daemon such as
-/// `codex app-server` has none and is not a session). When several processes of the same
-/// tool share a tty, keep the foreground one, else the lowest pid.
+/// `codex app-server` has none and is not a session), with its origin: from
+/// the process (ancestry, then [`Agent::origin`]), else from
+/// [`Agent::enrich`]. When
+/// several processes of the same tool share a tty, keep a shown one over a
+/// hidden one, then the foreground one, then the lowest pid.
 pub fn detect(
     table: &ProcessTable,
     agents: &[Box<dyn Agent>],
     ctx: &AgentContext,
 ) -> Vec<AgentInfo> {
-    let mut picked: Vec<(&dyn Agent, &Process)> = Vec::new();
+    let mut picked: Vec<(&dyn Agent, &Process, Option<Origin>)> = Vec::new();
     for p in &table.procs {
         let Some(agent) = agents.iter().find(|a| a.matches(p)) else {
             continue;
@@ -167,16 +215,29 @@ pub fn detect(
         if p.tty.is_none() {
             continue;
         }
+        let origin = origin_of(table, agents, agent.as_ref(), p);
         let same = picked
             .iter()
-            .position(|(a, q)| a.tool() == agent.tool() && q.tty == p.tty);
+            .position(|(a, q, _)| a.tool() == agent.tool() && q.tty == p.tty);
         match same {
-            Some(i) if rank(p) < rank(picked[i].1) => picked[i] = (agent.as_ref(), p),
+            Some(i) if rank(p, origin) < rank(picked[i].1, picked[i].2) => {
+                picked[i] = (agent.as_ref(), p, origin)
+            }
             Some(_) => {}
-            None => picked.push((agent.as_ref(), p)),
+            None => picked.push((agent.as_ref(), p, origin)),
         }
     }
-    picked.into_iter().map(|(a, p)| a.enrich(p, ctx)).collect()
+    picked
+        .into_iter()
+        .map(|(a, p, origin)| {
+            // The process wins; else whatever the tool's session data says.
+            let info = a.enrich(p, ctx);
+            AgentInfo {
+                origin: origin.or(info.origin),
+                ..info
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -203,6 +264,130 @@ mod tests {
             elapsed_secs: 10,
             args: args.into(),
         }
+    }
+
+    fn child(pid: u32, ppid: u32, tty: &str, args: &str) -> Process {
+        Process {
+            ppid,
+            ..proc(pid, pid, pid, Some(tty), args)
+        }
+    }
+
+    fn origins(table: &ProcessTable) -> Vec<(String, u32, Option<Origin>)> {
+        detect(table, &registry(), &ctx())
+            .into_iter()
+            .map(|a| (a.tool, a.pid, a.origin))
+            .collect()
+    }
+
+    #[test]
+    fn detect_marks_agents_started_by_agents_as_subagents() {
+        let table = ProcessTable {
+            procs: vec![
+                child(1, 0, "ttys1", "/bin/zsh"),
+                child(10, 1, "ttys1", "claude"),
+                child(11, 10, "ttys1", "/bin/sh -c review"),
+                child(12, 11, "ttys1", "python3 -m reviewer"),
+                child(13, 12, "ttys1", "claude --output-format stream-json"),
+                child(20, 1, "ttys2", "codex"),
+                child(21, 20, "ttys2", "gemini"),
+            ],
+        };
+        assert_eq!(
+            origins(&table),
+            vec![
+                ("claude-code".into(), 10, None),
+                ("codex".into(), 20, None),
+                ("gemini".into(), 21, Some(Origin::Subagent)),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_keeps_a_lone_hidden_agent_and_prefers_shown_ones() {
+        // On ttys3 a print-mode claude that the person's claude started has
+        // the lower pid, but the person's session wins. On ttys5 a hidden job
+        // alone on its tty stays, marked subagent.
+        let table = ProcessTable {
+            procs: vec![
+                child(5, 50, "ttys3", "claude -p review"),
+                child(50, 1, "ttys3", "claude"),
+                child(60, 1, "ttys4", "claude"),
+                child(61, 60, "ttys5", "claude -p x"),
+            ],
+        };
+        assert_eq!(
+            origins(&table),
+            vec![
+                ("claude-code".into(), 50, None),
+                ("claude-code".into(), 60, None),
+                ("claude-code".into(), 61, Some(Origin::Subagent)),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_skips_a_same_tool_launcher_parent() {
+        let table = ProcessTable {
+            procs: vec![
+                child(30, 1, "ttys6", "node /opt/homebrew/bin/codex"),
+                child(31, 30, "ttys6", "/opt/codex/codex-aarch64"),
+                child(40, 1, "ttys7", "node /opt/bin/codex"),
+                child(41, 40, "ttys7", "node /opt/bin/claude"),
+                child(50, 1, "ttys8", "codex"),
+                child(51, 50, "ttys8", "codex exec x"),
+            ],
+        };
+        let r = registry();
+        let codex = r.iter().find(|a| a.tool() == "codex").unwrap();
+        let claude = r.iter().find(|a| a.tool() == "claude-code").unwrap();
+        let of =
+            |agent: &dyn Agent, pid: u32| origin_of(&table, &r, agent, table.get(pid).unwrap());
+        // The codex that a node launcher starts is the person's session.
+        assert_eq!(of(codex.as_ref(), 31), None);
+        // Claude under a codex launcher: another tool, so a subagent.
+        assert_eq!(of(claude.as_ref(), 41), Some(Origin::Subagent));
+        // A codex that a native codex started is a job, not a launch.
+        assert_eq!(of(codex.as_ref(), 51), Some(Origin::Subagent));
+    }
+
+    #[test]
+    fn has_flag_stops_at_the_prompt_separator() {
+        assert!(has_flag(&["-p", "x"], &["-p"]));
+        assert!(!has_flag(&["--", "-p"], &["-p"]));
+        assert!(!has_flag(&["x"], &[]));
+    }
+
+    #[test]
+    fn tools_read_print_mode_from_the_command_line() {
+        let r = registry();
+        let o = |tool: &str, args: &str| {
+            let a = r.iter().find(|a| a.tool() == tool).unwrap();
+            a.origin(&proc(1, 1, 1, None, args))
+        };
+        assert_eq!(o("claude-code", "claude -p hi"), Some(Origin::Automated));
+        assert_eq!(o("claude-code", "claude --print"), Some(Origin::Automated));
+        assert_eq!(o("claude-code", "claude --resume x"), None);
+        assert_eq!(o("claude-code", "claude -- -p"), None);
+        assert_eq!(o("devin", "devin -p -- hi"), Some(Origin::Automated));
+        assert_eq!(o("devin", "devin"), None);
+        assert_eq!(o("codex", "codex exec fix"), Some(Origin::Automated));
+        assert_eq!(
+            o("codex", "codex --full-auto e fix"),
+            Some(Origin::Automated)
+        );
+        assert_eq!(o("codex", "codex resume abc"), None);
+        assert_eq!(o("codex", "codex"), None);
+        assert_eq!(o("gemini", "gemini -p hi"), None);
+        let marked = generic::NamedTool {
+            tool: "t",
+            programs: &["t"],
+            print_markers: &["run"],
+        };
+        assert_eq!(
+            marked.origin(&proc(1, 1, 1, None, "t run x")),
+            Some(Origin::Automated)
+        );
     }
 
     #[test]

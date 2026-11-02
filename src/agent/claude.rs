@@ -6,7 +6,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{base_info, resume_line, Agent, AgentContext};
+use super::{automated_if_flag, base_info, resume_line, Agent, AgentContext};
+use crate::model::Origin;
 use crate::tabs::process::Process;
 use crate::tabs::{AgentInfo, AgentStatus};
 
@@ -88,6 +89,11 @@ impl Agent for ClaudeAgent {
 
     fn matches(&self, p: &Process) -> bool {
         p.program() == "claude"
+    }
+
+    /// `-p` / `--print` runs without a person (checked in `claude --help`).
+    fn origin(&self, p: &Process) -> Option<Origin> {
+        automated_if_flag(p, &["-p", "--print"])
     }
 
     fn enrich(&self, p: &Process, ctx: &AgentContext) -> AgentInfo {

@@ -55,6 +55,8 @@ pub struct AgentInfo {
     pub updated_at: Option<i64>,
     /// Command that resumes the session.
     pub resume_command: Option<String>,
+    /// Who started the agent; `None` when the process shows nothing.
+    pub origin: Option<crate::model::Origin>,
 }
 
 /// One terminal tab, optionally with an agent running in it.
@@ -100,6 +102,8 @@ pub struct ClosedSession {
     pub updated_at: Option<i64>,
     /// `cd '<cwd>' && <command>`, which resumes the session from any folder.
     pub resume_command: String,
+    /// Who started the session; `None` when unknown.
+    pub origin: Option<crate::model::Origin>,
 }
 
 /// The result of listing tabs.
